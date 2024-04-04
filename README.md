@@ -7,9 +7,9 @@ This proxy was developed with the intention of being deployed in customer cluste
 
 # Releases
 
-Our release can be found here: https://hub.docker.com/r/statsig/statsig-forward-proxy/tags
-- All stable builds are prefixed with "stable"
-- If you want to work off bleeding edge, we generate the "latest" tag as code lands (give or take 10 minutes)
+Our release can be found here: https://hub.docker.com/r/statsig/statsig-forward-proxy
+- All stable builds have tags that are prefixed with "stable", for example: [stable-amd64-*](https://hub.docker.com/r/statsig/statsig-forward-proxy/tags?page=&page_size=&ordering=&name=stable)
+- If you want to work off bleeding edge, we generate the "[latest](https://hub.docker.com/r/statsig/statsig-forward-proxy/tags?page=&page_size=&ordering=&name=latest)" tag as code lands (give or take 10 minutes). If there's a particular datetime latest you are looking for, we also tag each one with the "[YYMMDDHHmmss](https://hub.docker.com/layers/statsig/statsig-forward-proxy/240404230603-bff2e9385632/images/sha256-0a2a2cc7a338510429ae0b611248be9f3c3371c1e3e046f070b4bbbd5bf62104?context=explore)" prefix.
 - If you want "nightly", we generate daily branch cuts with the tag prefix "DDMMYY", for example, the April 4th nightly build is "240404-1ffdf554b54b". This is a daily branch cut that occurs at midnight.
 
 # Recommended Methods of Deployment
