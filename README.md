@@ -23,6 +23,13 @@ The software architecture is designed as follows:
 
 <img width="1075" alt="Screenshot 2024-04-03 at 7 48 00 PM" src="https://github.com/statsig-io/statsig-forward-proxy/assets/111610731/4b98fd95-55d0-405a-8800-b7cc1c2bb6b2">
 
+# Releases
+
+Our release can be found here: https://hub.docker.com/r/statsig/statsig-forward-proxy/tags
+- All stable builds are prefixed with "stable"
+- If you want to work off bleeding edge, we generate the "latest" tag as code lands (give or take 10 minutes)
+- If you want "nightly", we generate daily branch cuts with the tag prefix "DDMMYY", for example, the April 4th nightly build is "240404-1ffdf554b54b". This is a daily branch cut that occurs at midnight.
+
 # Future Development
 
 We are actively working on enabling the forward proxy to support /v1/log_event calls as well. This will
