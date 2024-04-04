@@ -32,6 +32,10 @@ struct Cli {
     debug_logging: bool,
     #[clap(short, long, default_value = "1000")]
     maximum_concurrent_sdk_keys: u16,
+    #[clap(short, long, default_value = "10")]
+    polling_interval_in_s: u64,
+    #[clap(short, long, default_value = "64")]
+    update_batch_size: u64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -82,6 +86,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shared_cache.clone(),
         shared_http_data_provider,
         shared_dcs_observer.clone(),
+        cli.polling_interval_in_s,
+        cli.update_batch_size,
     );
     let shared_background_data_provider = Arc::new(background_data_provider);
     let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());

@@ -15,6 +15,8 @@ pub struct BackgroundDataProvider {
     http_data_prover: Arc<http_data_provider::HttpDataProvider>,
     backup_cache: Arc<dyn NewDcsObserverTrait + Sync + Send>,
     dcs_observer: Arc<NewDcsObserver>,
+    polling_interval_in_s: u64,
+    update_batch_size: u64,
 }
 
 // Note: sync_write synchronizes on the entire store and not just
@@ -36,6 +38,7 @@ pub async fn foreground_fetch(bdp: Arc<BackgroundDataProvider>, sdk_key: &str, s
         bdp.http_data_prover.clone(),
         bdp.backup_cache.clone(),
         bdp.dcs_observer.clone(),
+        1, // Only ever fetching one key
     )
     .await;
 }
@@ -45,11 +48,15 @@ impl BackgroundDataProvider {
         backup_cache: Arc<dyn NewDcsObserverTrait + Sync + Send>,
         data_provider: Arc<HttpDataProvider>,
         dcs_observer: Arc<NewDcsObserver>,
+        polling_interval_in_s: u64,
+        update_batch_size: u64,
     ) -> Self {
         BackgroundDataProvider {
             http_data_prover: data_provider,
             backup_cache,
             dcs_observer,
+            polling_interval_in_s,
+            update_batch_size,
         }
     }
 
@@ -57,6 +64,8 @@ impl BackgroundDataProvider {
         let shared_data_provider = self.http_data_prover.clone();
         let shared_observer = self.dcs_observer.clone();
         let shared_backup_cache = self.backup_cache.clone();
+        let batch_size = self.update_batch_size;
+        let polling_interval_in_s = self.polling_interval_in_s;
         tokio::spawn(async move {
             loop {
                 let store_iter = sdk_key_store.get_registered_store().await;
@@ -65,9 +74,10 @@ impl BackgroundDataProvider {
                     shared_data_provider.clone(),
                     shared_backup_cache.clone(),
                     shared_observer.clone(),
+                    batch_size,
                 )
                 .await;
-                sleep(Duration::from_secs(10)).await;
+                sleep(Duration::from_secs(polling_interval_in_s)).await;
             }
         });
     }
@@ -77,6 +87,7 @@ impl BackgroundDataProvider {
         data_provider: Arc<HttpDataProvider>,
         backup_cache: Arc<dyn NewDcsObserverTrait + Sync + Send>,
         dcs_observer: Arc<NewDcsObserver>,
+        update_batch_size: u64,
     ) {
         let mut join_handles = Vec::new();
 
@@ -106,8 +117,11 @@ impl BackgroundDataProvider {
             });
 
             join_handles.push(join_handle);
+            if join_handles.len() >= update_batch_size as usize {
+                futures::future::join_all(join_handles).await;
+                join_handles = Vec::new();
+            }
         }
-
         futures::future::join_all(join_handles).await;
     }
 }
