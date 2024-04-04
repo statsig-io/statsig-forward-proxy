@@ -4,6 +4,7 @@ use super::{DataProviderRequestResult, DataProviderResult, DataProviderTrait};
 use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{proxy_event_observer::ProxyEventObserver, ProxyEvent, ProxyEventType};
+use reqwest::header::HeaderMap;
 use reqwest::Client;
 pub trait DataProviderObserver {
     fn update(&self, key: &str, data: &str);
@@ -28,6 +29,7 @@ impl HttpDataProvider {
 }
 
 use async_trait::async_trait;
+
 use tokio::time::Instant;
 #[async_trait]
 impl DataProviderTrait for HttpDataProvider {
@@ -40,28 +42,40 @@ impl DataProviderTrait for HttpDataProvider {
                 self.url, key, lcut
             ),
         };
-        let response = self
-            .http_client
-            .get(url)
-            .send()
-            .await
-            .expect("We must have a response");
-        let did_succeed = response.status().is_success();
-        let headers = response.headers().clone();
-        let raw_bytes = response
-            .bytes()
-            .await
-            .expect("Body should always be bytes for DCS");
-        // Warning: If we ever decide to touch the String and not just return it
-        // we should stop using from_utf8_unchecked
-        let body = unsafe { String::from_utf8_unchecked(raw_bytes.into()) };
+        let mut err_msg: String = String::new();
+        let mut body: String = String::new();
+        let mut headers: HeaderMap = HeaderMap::new();
+        match self.http_client.get(url).send().await {
+            Ok(response) => {
+                headers = response.headers().clone();
+                let did_succeed = response.status().is_success();
+                match response.bytes().await {
+                    Ok(raw_bytes) => {
+                        // Warning: If we ever decide to touch the String and not just return it
+                        // we should stop using from_utf8_unchecked
+                        if did_succeed {
+                            body = unsafe { String::from_utf8_unchecked(raw_bytes.into()) };
+                        } else {
+                            err_msg = unsafe { String::from_utf8_unchecked(raw_bytes.into()) };
+                        }
+                    }
+                    Err(err) => {
+                        err_msg = err.to_string();
+                    }
+                }
+            }
+            Err(err) => {
+                err_msg = err.to_string();
+            }
+        }
+
         let duration = start_time.elapsed();
         let ms: i64 =
             match i64::try_from(duration.as_secs() * 1000 + (duration.subsec_millis() as u64)) {
                 Ok(ms) => ms,
                 Err(_err) => -2,
             };
-        if did_succeed {
+        if err_msg.is_empty() {
             // TODO: This should be more robust
             if body == "{\"has_updates\":false}" {
                 ProxyEventObserver::publish_event(
@@ -123,7 +137,7 @@ impl DataProviderTrait for HttpDataProvider {
                 }
             }
         } else {
-            eprintln!("Failed to get data from http provider: {:?}", body);
+            eprintln!("Failed to get data from http provider: {:?}", err_msg);
             ProxyEventObserver::publish_event(
                 ProxyEvent::new(ProxyEventType::HttpDataProviderError, key.to_string())
                     .with_lcut(lcut)
