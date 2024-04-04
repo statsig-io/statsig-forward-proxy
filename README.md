@@ -15,13 +15,13 @@ We recommend two main modes of deploying the statsig forward proxy:
    proxy becomes unavailable, then you will need to make a lot network requests to our CDN
    which will have increased latency.
 
-<img width="636" alt="Screenshot 2024-04-03 at 7 26 56 PM" src="https://github.com/statsig-io/private-statsig-forward-proxy/assets/111610731/2c4c66e0-7c0d-454f-8a23-d0945c6a150d">
+<img width="636" alt="Screenshot 2024-04-03 at 7 26 56 PM" src="https://github.com/statsig-io/statsig-forward-proxy/assets/111610731/6f24c712-1423-4cb7-af07-aaeaf0f0d91f">
 
 # Architecture
 
 The software architecture is designed as follows:
 
-<img width="1088" alt="Screenshot 2024-04-03 at 3 58 19 PM" src="https://github.com/statsig-io/private-statsig-forward-proxy/assets/111610731/9d0b1e2a-2282-4cb3-81be-63e93043cc2f">
+<img width="1075" alt="Screenshot 2024-04-03 at 7 48 00 PM" src="https://github.com/statsig-io/statsig-forward-proxy/assets/111610731/4b98fd95-55d0-405a-8800-b7cc1c2bb6b2">
 
 # Future Development
 
