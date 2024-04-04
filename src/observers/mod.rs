@@ -21,7 +21,7 @@ pub trait NewDcsObserverTrait {
     async fn get(&self, key: &str) -> Option<Arc<String>>;
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ProxyEventType {
     HttpServerRequestSuccess,
     HttpServerRequestFailed,
@@ -53,6 +53,7 @@ pub enum OperationType {
     IncrByValue,
 }
 
+#[derive(Debug)]
 pub struct EventStat {
     pub operation_type: OperationType,
     pub value: i64,

@@ -18,6 +18,7 @@ impl HttpDataProvider {
     pub fn new(url: &str) -> Self {
         HttpDataProvider {
             http_client: Client::builder()
+                .gzip(true)
                 .pool_idle_timeout(None)
                 .build()
                 .expect("We must have an http client"),
