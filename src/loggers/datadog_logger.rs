@@ -242,9 +242,9 @@ mod batching {
         let mut batch: Vec<Operation> = vec![];
         let mut last_updated = Instant::now();
         let should_flush = |batch_len, last_updated| {
-            last_updated + Duration::from_millis(config.datadog_max_batch_time_ms.unwrap_or(300))
+            last_updated + Duration::from_millis(config.datadog_max_batch_time_ms.unwrap_or(10000))
                 < Instant::now()
-                || config.datadog_max_batch_event_count.unwrap_or(1000) < batch_len
+                || config.datadog_max_batch_event_count.unwrap_or(3000) < batch_len
         };
 
         loop {

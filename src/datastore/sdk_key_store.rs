@@ -60,11 +60,7 @@ impl SdkKeyStore {
             true => {
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheHit, key.to_string())
-                        .with_lcut(since_time)
-                        .with_stat(EventStat {
-                            operation_type: OperationType::IncrByValue,
-                            value: 1,
-                        }),
+                        .with_lcut(since_time),
                 )
                 .await;
                 true
@@ -72,11 +68,7 @@ impl SdkKeyStore {
             false => {
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheMiss, key.to_string())
-                        .with_lcut(since_time)
-                        .with_stat(EventStat {
-                            operation_type: OperationType::IncrByValue,
-                            value: 1,
-                        }),
+                        .with_lcut(since_time),
                 )
                 .await;
                 false
