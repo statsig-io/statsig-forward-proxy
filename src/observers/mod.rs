@@ -42,6 +42,10 @@ pub enum ProxyEventType {
     SdkKeyStoreCacheHit,
     ConfigSpecStoreGotData,
     ConfigSpecStoreGotNoData,
+    GrpcStreamingStreamedInitialized,
+    GrpcStreamingStreamedResponse,
+    GrpcStreamingStreamDisconnected,
+    StreamingChannelGotNewData,
 }
 
 #[derive(Clone, PartialEq, Debug, Copy)]

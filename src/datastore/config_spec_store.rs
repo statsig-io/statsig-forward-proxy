@@ -102,7 +102,11 @@ impl ConfigSpecStore {
         }
     }
 
-    pub async fn get_config_spec(&self, sdk_key: &str, since_time: u64) -> Option<Arc<String>> {
+    pub async fn get_config_spec(
+        &self,
+        sdk_key: &str,
+        since_time: u64,
+    ) -> Option<Arc<RwLock<ConfigSpecForCompany>>> {
         if !self.sdk_key_store.has_key(sdk_key, since_time).await {
             // Since it's a cache-miss, just fill with a full payload
             // and check if we should return no update manually
@@ -120,9 +124,15 @@ impl ConfigSpecStore {
         match record {
             Some(record) => {
                 if record.read().await.lcut > since_time {
-                    Some(record.read().await.config.clone())
+                    Some(Arc::clone(record))
                 } else {
-                    Some(self.no_update_payload.clone())
+                    Some(Arc::new(
+                        ConfigSpecForCompany {
+                            lcut: since_time,
+                            config: self.no_update_payload.clone(),
+                        }
+                        .into(),
+                    ))
                 }
             }
             None => {

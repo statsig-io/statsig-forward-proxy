@@ -108,7 +108,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.mode {
         TransportMode::Grpc => {
-            servers::grpc_server::GrpcServer::start_server(shared_config_spec_store).await?
+            servers::grpc_server::GrpcServer::start_server(
+                shared_config_spec_store,
+                shared_dcs_observer,
+            )
+            .await?
         }
         TransportMode::Http => {
             servers::http_server::HttpServer::start_server(shared_config_spec_store).await?

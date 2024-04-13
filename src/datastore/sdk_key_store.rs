@@ -1,6 +1,4 @@
 use super::data_providers::DataProviderRequestResult;
-use crate::observers::EventStat;
-use crate::observers::OperationType;
 use crate::observers::{
     proxy_event_observer::ProxyEventObserver, NewDcsObserverTrait, ProxyEvent, ProxyEventType,
 };

@@ -71,7 +71,7 @@ async fn get_download_config_specs(
         .get_config_spec(&auth_header.sdk_key, sinceTime.unwrap_or(0))
         .await
     {
-        Some(data) => Ok(data.to_string()),
+        Some(data) => Ok(data.read().await.config.to_string()),
         None => Err(Status::Unauthorized),
     }
 }
@@ -93,7 +93,7 @@ async fn post_download_config_specs(
         .get_config_spec(&auth_header.sdk_key, dcs_request.since_time.unwrap_or(0))
         .await
     {
-        Some(data) => Ok(data.to_string()),
+        Some(data) => Ok(data.read().await.config.to_string()),
         None => Err(Status::Unauthorized),
     }
 }
