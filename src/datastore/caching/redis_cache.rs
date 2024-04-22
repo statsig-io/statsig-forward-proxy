@@ -7,7 +7,8 @@ use tokio::sync::RwLock;
 use crate::{
     datastore::data_providers::DataProviderRequestResult,
     observers::{
-        proxy_event_observer::ProxyEventObserver, NewDcsObserverTrait, ProxyEvent, ProxyEventType,
+        proxy_event_observer::ProxyEventObserver, HttpDataProviderObserverTrait, ProxyEvent,
+        ProxyEventType,
     },
 };
 
@@ -19,8 +20,12 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub struct RedisCache {
+    key_prefix: String,
     connection: bb8::Pool<RedisConnectionManager>,
     hash_cache: Arc<RwLock<HashMap<String, String>>>,
+    uuid: String,
+    leader_key_ttl: i64,
+    check_lcut: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -34,8 +39,15 @@ pub struct RedisEnvConfig {
     pub redis_tls: Option<bool>,
 }
 
+const REDIS_LEADER_KEY: &str = "statsig_forward_proxy::leader";
+
 impl RedisCache {
-    pub async fn new() -> Self {
+    pub async fn new(
+        key_prefix: String,
+        leader_key_ttl: i64,
+        uuid: &str,
+        check_lcut: bool,
+    ) -> Self {
         let config = envy::from_env::<RedisEnvConfig>().expect("Malformed config");
         let protocol = match config.redis_tls.is_some_and(|x| x) {
             true => "rediss",
@@ -62,8 +74,12 @@ impl RedisCache {
             .expect("Failed to create redis connection pool on startup");
 
         RedisCache {
+            key_prefix,
             connection: redis_pool,
             hash_cache: Arc::new(RwLock::new(HashMap::new())),
+            uuid: uuid.to_string(),
+            leader_key_ttl,
+            check_lcut,
         }
     }
 
@@ -80,7 +96,7 @@ impl RedisCache {
 
         // Hash key so that we aren't loading a bunch of sdk keys
         // into memory
-        let hashed_key = format!("statsig::{:x}", Sha256::digest(key));
+        let hashed_key = format!("{}::{:x}", self.key_prefix, Sha256::digest(key));
         self.hash_cache
             .write()
             .await
@@ -91,7 +107,7 @@ impl RedisCache {
 
 use async_trait::async_trait;
 #[async_trait]
-impl NewDcsObserverTrait for RedisCache {
+impl HttpDataProviderObserverTrait for RedisCache {
     fn force_notifier_to_wait_for_update(&self) -> bool {
         false
     }
@@ -111,20 +127,27 @@ impl NewDcsObserverTrait for RedisCache {
                     let mut pipe = redis::pipe();
                     pipe.atomic();
                     let should_update = match pipe
+                        .set_nx(REDIS_LEADER_KEY, self.uuid.clone())
+                        .get(REDIS_LEADER_KEY)
                         .hget(&redis_key, "lcut")
-                        .query_async::<MultiplexedConnection, Vec<String>>(&mut *conn)
+                        .query_async::<MultiplexedConnection, (i32, String, Option<String>)>(
+                            &mut *conn,
+                        )
                         .await
                     {
-                        Ok(stored_lcut) => {
-                            if stored_lcut.len() != 1 {
-                                false
+                        Ok(query_result) => {
+                            let is_leader = query_result.1 == self.uuid;
+                            if self.check_lcut && query_result.2.is_some() {
+                                let should_update =
+                                    query_result.2.expect("exists").parse().unwrap_or(0) < lcut;
+                                is_leader && should_update
                             } else {
-                                stored_lcut[0].parse().unwrap_or(0) < lcut
+                                is_leader
                             }
                         }
                         Err(e) => {
-                            println!("error: {:?}", e);
-                            true
+                            println!("error checking if leader: {:?}", e);
+                            false
                         }
                     };
 
@@ -132,6 +155,7 @@ impl NewDcsObserverTrait for RedisCache {
                         match pipe
                             .hset(&redis_key, "lcut", lcut)
                             .hset(&redis_key, "config", data.to_string())
+                            .expire(REDIS_LEADER_KEY, self.leader_key_ttl)
                             .query_async::<MultiplexedConnection, ()>(&mut *conn)
                             .await
                         {
@@ -141,7 +165,6 @@ impl NewDcsObserverTrait for RedisCache {
                                         ProxyEventType::RedisCacheWriteSucceed,
                                         key.to_string(),
                                     )
-                                    .with_lcut(lcut)
                                     .with_stat(EventStat {
                                         operation_type: OperationType::IncrByValue,
                                         value: 1,
@@ -155,7 +178,6 @@ impl NewDcsObserverTrait for RedisCache {
                                         ProxyEventType::RedisCacheWriteFailed,
                                         key.to_string(),
                                     )
-                                    .with_lcut(lcut)
                                     .with_stat(EventStat {
                                         operation_type: OperationType::IncrByValue,
                                         value: 1,
@@ -171,7 +193,6 @@ impl NewDcsObserverTrait for RedisCache {
                                 ProxyEventType::RedisCacheWriteSkipped,
                                 key.to_string(),
                             )
-                            .with_lcut(lcut)
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -183,7 +204,6 @@ impl NewDcsObserverTrait for RedisCache {
                 Err(e) => {
                     ProxyEventObserver::publish_event(
                         ProxyEvent::new(ProxyEventType::RedisCacheWriteFailed, key.to_string())
-                            .with_lcut(lcut)
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,

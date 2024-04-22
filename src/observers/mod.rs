@@ -1,4 +1,4 @@
-pub mod new_dcs_observer;
+pub mod http_data_provider_observer;
 pub mod proxy_event_observer;
 
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use crate::datastore::data_providers::DataProviderRequestResult;
 
 #[async_trait]
-pub trait NewDcsObserverTrait {
+pub trait HttpDataProviderObserverTrait {
     fn force_notifier_to_wait_for_update(&self) -> bool;
 
     async fn update(

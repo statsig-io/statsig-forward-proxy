@@ -22,7 +22,7 @@ RUN rm src/*.rs
 # Copy Important stuff and then build final binary
 COPY ./src ./src
 COPY ./build.rs ./build.rs
-COPY ./protos ./protos
+COPY ./api-interface-definitions ./api-interface-definitions
 RUN rm ./target/release/deps/server*
 RUN cargo build --release
 

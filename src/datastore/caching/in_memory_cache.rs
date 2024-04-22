@@ -3,8 +3,8 @@ use crate::{
         config_spec_store::ConfigSpecForCompany, data_providers::DataProviderRequestResult,
     },
     observers::{
-        proxy_event_observer::ProxyEventObserver, EventStat, NewDcsObserverTrait, OperationType,
-        ProxyEvent, ProxyEventType,
+        proxy_event_observer::ProxyEventObserver, EventStat, HttpDataProviderObserverTrait,
+        OperationType, ProxyEvent, ProxyEventType,
     },
 };
 
@@ -28,7 +28,7 @@ impl InMemoryCache {
 
 use async_trait::async_trait;
 #[async_trait]
-impl NewDcsObserverTrait for InMemoryCache {
+impl HttpDataProviderObserverTrait for InMemoryCache {
     fn force_notifier_to_wait_for_update(&self) -> bool {
         false
     }
@@ -53,7 +53,6 @@ impl NewDcsObserverTrait for InMemoryCache {
                 if lcut > record.lcut {
                     ProxyEventObserver::publish_event(
                         ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSucceed, key.to_string())
-                            .with_lcut(lcut)
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -63,7 +62,6 @@ impl NewDcsObserverTrait for InMemoryCache {
                 } else {
                     ProxyEventObserver::publish_event(
                         ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSkipped, key.to_string())
-                            .with_lcut(lcut)
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -74,7 +72,6 @@ impl NewDcsObserverTrait for InMemoryCache {
             } else {
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSucceed, key.to_string())
-                        .with_lcut(lcut)
                         .with_stat(EventStat {
                             operation_type: OperationType::IncrByValue,
                             value: 1,

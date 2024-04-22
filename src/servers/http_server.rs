@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::datastore::get_id_list_store::GetIdListStore;
 use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{ProxyEvent, ProxyEventType};
@@ -98,18 +99,35 @@ async fn post_download_config_specs(
     }
 }
 
+#[post("/get_id_lists")]
+async fn post_get_id_lists(
+    get_id_list_store: &State<Arc<GetIdListStore>>,
+    auth_header: AuthHeader,
+) -> Result<String, Status> {
+    match get_id_list_store.get_id_lists(&auth_header.sdk_key).await {
+        Some(data) => Ok(data.read().await.idlists.to_string()),
+        None => Err(Status::Unauthorized),
+    }
+}
+
 pub struct HttpServer {}
 
 impl HttpServer {
     pub async fn start_server(
         config_spec_store: Arc<ConfigSpecStore>,
+        id_list_store: Arc<GetIdListStore>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         rocket::build()
             .mount(
                 "/v1",
-                routes![get_download_config_specs, post_download_config_specs],
+                routes![
+                    get_download_config_specs,
+                    post_download_config_specs,
+                    post_get_id_lists
+                ],
             )
             .manage(config_spec_store)
+            .manage(id_list_store)
             .attach(AdHoc::on_request("Normalize SDK Key", |req, _| {
                 Box::pin(async move {
                     req.local_cache(|| TimerStart(Some(Instant::now())));

@@ -1,6 +1,7 @@
 use super::data_providers::DataProviderRequestResult;
 use crate::observers::{
-    proxy_event_observer::ProxyEventObserver, NewDcsObserverTrait, ProxyEvent, ProxyEventType,
+    proxy_event_observer::ProxyEventObserver, HttpDataProviderObserverTrait, ProxyEvent,
+    ProxyEventType,
 };
 use async_trait::async_trait;
 use std::collections::hash_map::IntoIter;
@@ -8,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 #[async_trait]
-impl NewDcsObserverTrait for SdkKeyStore {
+impl HttpDataProviderObserverTrait for SdkKeyStore {
     fn force_notifier_to_wait_for_update(&self) -> bool {
         true
     }
@@ -24,9 +25,7 @@ impl NewDcsObserverTrait for SdkKeyStore {
             || result == &DataProviderRequestResult::NoDataAvailable
         {
             let mut write_lock = self.keystore.write().await;
-            if *write_lock.get(sdk_key).unwrap_or(&0) < lcut {
-                write_lock.insert(sdk_key.to_string(), lcut);
-            }
+            write_lock.insert(sdk_key.to_string(), lcut);
         }
     }
 
@@ -53,21 +52,21 @@ impl SdkKeyStore {
         }
     }
 
-    pub async fn has_key(&self, key: &str, since_time: u64) -> bool {
+    pub async fn has_key(&self, key: &str, _since_time: u64) -> bool {
         match self.keystore.read().await.contains_key(key) {
             true => {
-                ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheHit, key.to_string())
-                        .with_lcut(since_time),
-                )
+                ProxyEventObserver::publish_event(ProxyEvent::new(
+                    ProxyEventType::SdkKeyStoreCacheHit,
+                    key.to_string(),
+                ))
                 .await;
                 true
             }
             false => {
-                ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheMiss, key.to_string())
-                        .with_lcut(since_time),
-                )
+                ProxyEventObserver::publish_event(ProxyEvent::new(
+                    ProxyEventType::SdkKeyStoreCacheMiss,
+                    key.to_string(),
+                ))
                 .await;
                 false
             }

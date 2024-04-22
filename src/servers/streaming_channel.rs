@@ -1,5 +1,5 @@
 use crate::datastore::data_providers::DataProviderRequestResult;
-use crate::observers::NewDcsObserverTrait;
+use crate::observers::HttpDataProviderObserverTrait;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -30,7 +30,7 @@ impl StreamingChannel {
 }
 
 #[async_trait]
-impl NewDcsObserverTrait for StreamingChannel {
+impl HttpDataProviderObserverTrait for StreamingChannel {
     fn force_notifier_to_wait_for_update(&self) -> bool {
         false
     }
@@ -48,7 +48,6 @@ impl NewDcsObserverTrait for StreamingChannel {
         {
             ProxyEventObserver::publish_event(
                 ProxyEvent::new(ProxyEventType::StreamingChannelGotNewData, key.to_string())
-                    .with_lcut(lcut)
                     .with_stat(EventStat {
                         operation_type: OperationType::IncrByValue,
                         value: 1,

@@ -1,82 +1,138 @@
-use crate::observers::NewDcsObserverTrait;
-use crate::{datastore::sdk_key_store, observers::new_dcs_observer::NewDcsObserver};
-
-use super::{
-    http_data_provider::{self, HttpDataProvider},
-    DataProviderRequestResult, DataProviderTrait,
-};
+use super::request_builder::RequestBuilderTrait;
+use super::{http_data_provider::HttpDataProvider, DataProviderRequestResult, DataProviderTrait};
 use std::{collections::HashMap, sync::Arc};
 
+use futures::future::try_join_all;
+use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
-use cached::proc_macro::cached;
-
 pub struct BackgroundDataProvider {
-    http_data_prover: Arc<http_data_provider::HttpDataProvider>,
-    backup_cache: Arc<dyn NewDcsObserverTrait + Sync + Send>,
-    dcs_observer: Arc<NewDcsObserver>,
+    http_data_prover: Arc<HttpDataProvider>,
     polling_interval_in_s: u64,
     update_batch_size: u64,
+    foreground_fetch_lock: RwLock<HashMap<String, Arc<RwLock<bool>>>>,
+    request_builder: RwLock<Arc<Vec<Arc<dyn RequestBuilderTrait>>>>,
 }
 
-// Note: sync_write synchronizes on the entire store and not just
-//       the cache key. This means if there are a constant stream
-//       of cold cache requests, you will have a bottleneck. However,
-//       since cold cache requests should stop pretty quickly, we
-//       should be fine.
-#[cached(
-    key = "String",
-    convert = r#"{ format!("{}|{}", sdk_key, since_time) }"#,
-    size = 100,
-    sync_writes = true
-)]
 pub async fn foreground_fetch(bdp: Arc<BackgroundDataProvider>, sdk_key: &str, since_time: u64) {
-    let mut data = HashMap::new();
-    data.insert(sdk_key.to_string(), since_time);
-    BackgroundDataProvider::impl_foreground_fetch(
-        data.into_iter(),
-        bdp.http_data_prover.clone(),
-        bdp.backup_cache.clone(),
-        bdp.dcs_observer.clone(),
-        1, // Only ever fetching one key
-    )
-    .await;
+    let key = format!("{}|{}", sdk_key, since_time);
+    let contains_key = bdp.foreground_fetch_lock.read().await.contains_key(&key);
+    let lock_ref = match contains_key {
+        true => Arc::clone(
+            bdp.foreground_fetch_lock
+                .read()
+                .await
+                .get(&key)
+                .expect("validated existence"),
+        ),
+        false => {
+            let new_lock_ref: Arc<RwLock<bool>> = Arc::new(RwLock::new(false));
+            bdp.foreground_fetch_lock
+                .write()
+                .await
+                .insert(key.clone(), Arc::clone(&new_lock_ref));
+            new_lock_ref
+        }
+    };
+
+    // If already initialized, return
+    if *lock_ref.read().await {
+        return;
+    }
+
+    // Otherwise, grab write lock and set to true
+    // after we finish initializing
+    let mut lock = lock_ref.write().await;
+    // Someone else could have won the race, so if so
+    // just return
+    if *lock {
+        return;
+    }
+    // If we won the race, then initialize and set
+    // has initialized to true
+    let tasks = bdp
+        .request_builder
+        .read()
+        .await
+        .iter()
+        .map(|builder| {
+            let shared_data_provider_clone = Arc::clone(&bdp.http_data_prover);
+            let builder_clone = Arc::clone(builder);
+            let sdk_key_copy = sdk_key.to_string();
+            tokio::task::spawn(async move {
+                let mut data = HashMap::new();
+                data.insert(sdk_key_copy.clone(), since_time);
+                BackgroundDataProvider::impl_foreground_fetch(
+                    data.into_iter(),
+                    &shared_data_provider_clone,
+                    1,
+                    &builder_clone,
+                )
+                .await;
+            })
+        })
+        .collect::<Vec<_>>();
+    if let Err(e) = try_join_all(tasks).await {
+        eprintln!("Failed to join background data provider fetches: {:?}", e);
+    }
+    *lock = true;
 }
 
 impl BackgroundDataProvider {
     pub fn new(
-        backup_cache: Arc<dyn NewDcsObserverTrait + Sync + Send>,
         data_provider: Arc<HttpDataProvider>,
-        dcs_observer: Arc<NewDcsObserver>,
         polling_interval_in_s: u64,
         update_batch_size: u64,
     ) -> Self {
         BackgroundDataProvider {
             http_data_prover: data_provider,
-            backup_cache,
-            dcs_observer,
             polling_interval_in_s,
             update_batch_size,
+            foreground_fetch_lock: RwLock::new(HashMap::new()),
+            request_builder: RwLock::new(Arc::new(Vec::new())),
         }
     }
 
-    pub fn start_background_thread(&self, sdk_key_store: Arc<sdk_key_store::SdkKeyStore>) {
+    pub async fn add_request_builder(&self, request_builder: Arc<dyn RequestBuilderTrait>) {
+        let mut lock = self.request_builder.write().await;
+        let data_vec = Arc::make_mut(&mut *lock);
+        data_vec.push(request_builder);
+    }
+
+    pub async fn start_background_thread(&self) {
         let shared_data_provider = self.http_data_prover.clone();
-        let shared_observer = self.dcs_observer.clone();
-        let shared_backup_cache = self.backup_cache.clone();
         let batch_size = self.update_batch_size;
         let polling_interval_in_s = self.polling_interval_in_s;
+        let request_builder = Arc::clone(&*self.request_builder.read().await);
         tokio::spawn(async move {
             loop {
-                let store_iter = sdk_key_store.get_registered_store().await;
-                BackgroundDataProvider::impl_foreground_fetch(
-                    store_iter,
-                    shared_data_provider.clone(),
-                    shared_backup_cache.clone(),
-                    shared_observer.clone(),
-                    batch_size,
-                )
-                .await;
+                let tasks = request_builder
+                    .iter()
+                    .map(|builder| {
+                        let shared_data_provider_clone = Arc::clone(&shared_data_provider);
+                        let builder_clone = Arc::clone(builder);
+                        tokio::task::spawn(async move {
+                            if !builder_clone.should_make_request().await {
+                                return;
+                            }
+
+                            let store_iter = builder_clone
+                                .get_sdk_key_store()
+                                .get_registered_store()
+                                .await;
+                            BackgroundDataProvider::impl_foreground_fetch(
+                                store_iter,
+                                &shared_data_provider_clone,
+                                batch_size,
+                                &builder_clone,
+                            )
+                            .await;
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if let Err(e) = try_join_all(tasks).await {
+                    eprintln!("Failed to join background data provider fetches: {:?}", e);
+                }
                 sleep(Duration::from_secs(polling_interval_in_s)).await;
             }
         });
@@ -84,32 +140,33 @@ impl BackgroundDataProvider {
 
     async fn impl_foreground_fetch(
         store_iter: impl Iterator<Item = (String, u64)>,
-        data_provider: Arc<HttpDataProvider>,
-        backup_cache: Arc<dyn NewDcsObserverTrait + Sync + Send>,
-        dcs_observer: Arc<NewDcsObserver>,
+        data_provider: &Arc<HttpDataProvider>,
         update_batch_size: u64,
+        request_builder: &Arc<dyn RequestBuilderTrait>,
     ) {
         let mut join_handles = Vec::new();
 
         for (sdk_key, lcut) in store_iter {
             let data_provider = data_provider.clone();
-            let backup_cache = backup_cache.clone();
-            let dcs_observer = dcs_observer.clone();
-
+            let request_builder = request_builder.clone();
             let join_handle = tokio::task::spawn(async move {
-                let dp_result = data_provider.get(&sdk_key, lcut).await;
+                let dp_result = data_provider.get(&request_builder, &sdk_key, lcut).await;
                 if dp_result.result == DataProviderRequestResult::NoDataAvailable
                     || dp_result.result == DataProviderRequestResult::DataAvailable
                 {
                     let data = dp_result
                         .data
                         .expect("If data is available, data must exist");
-                    dcs_observer
+                    request_builder
+                        .get_observers()
                         .notify_all(&dp_result.result, &sdk_key, data.1, &data.0)
                         .await;
                 } else if dp_result.result == DataProviderRequestResult::Error {
-                    if let Some(backup_data) = backup_cache.get(&sdk_key).await {
-                        dcs_observer
+                    if let Some(backup_data) =
+                        request_builder.get_backup_cache().get(&sdk_key).await
+                    {
+                        request_builder
+                            .get_observers()
                             .notify_all(&dp_result.result, &sdk_key, lcut, &backup_data)
                             .await;
                     }

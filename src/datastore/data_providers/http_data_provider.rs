@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::request_builder::RequestBuilderTrait;
 use super::{DataProviderRequestResult, DataProviderResult, DataProviderTrait};
 use crate::observers::EventStat;
 use crate::observers::OperationType;
@@ -12,18 +13,22 @@ pub trait DataProviderObserver {
 
 pub struct HttpDataProvider {
     http_client: reqwest::Client,
-    url: String,
+}
+
+impl Default for HttpDataProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HttpDataProvider {
-    pub fn new(url: &str) -> Self {
+    pub fn new() -> Self {
         HttpDataProvider {
             http_client: Client::builder()
                 .gzip(true)
                 .pool_idle_timeout(None)
                 .build()
                 .expect("We must have an http client"),
-            url: url.to_string(),
         }
     }
 }
@@ -33,19 +38,20 @@ use async_trait::async_trait;
 use tokio::time::Instant;
 #[async_trait]
 impl DataProviderTrait for HttpDataProvider {
-    async fn get(&self, key: &str, lcut: u64) -> DataProviderResult {
+    async fn get(
+        &self,
+        request_builder: &Arc<dyn RequestBuilderTrait>,
+        key: &str,
+        lcut: u64,
+    ) -> DataProviderResult {
         let start_time = Instant::now();
-        let url = match lcut == 0 {
-            true => format!("{}/v1/download_config_specs/{}.json", self.url, key),
-            false => format!(
-                "{}/v1/download_config_specs/{}.json?sinceTime={}",
-                self.url, key, lcut
-            ),
-        };
         let mut err_msg: String = String::new();
         let mut body: String = String::new();
         let mut headers: HeaderMap = HeaderMap::new();
-        match self.http_client.get(url).send().await {
+        match request_builder
+            .make_request(&self.http_client, key, lcut)
+            .await
+        {
             Ok(response) => {
                 headers = response.headers().clone();
                 let did_succeed = response.status().is_success();
@@ -80,7 +86,6 @@ impl DataProviderTrait for HttpDataProvider {
             if body == "{\"has_updates\":false}" {
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(ProxyEventType::HttpDataProviderNoData, key.to_string())
-                        .with_lcut(lcut)
                         .with_stat(EventStat {
                             operation_type: OperationType::Distribution,
                             value: ms,

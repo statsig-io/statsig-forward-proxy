@@ -30,6 +30,7 @@ Arguments:
 Options:
       --datadog-logging
       --debug-logging
+      --force_gcp_profiling_enabled
   -m, --maximum-concurrent-sdk-keys <MAXIMUM_CONCURRENT_SDK_KEYS>  [default: 1000]
   -p, --polling-interval-in-s <POLLING_INTERVAL_IN_S>              [default: 10]
   -u, --update-batch-size <UPDATE_BATCH_SIZE>                      [default: 64]
@@ -48,6 +49,7 @@ Additional logging parameters we support:
 --debug-logging: This enables state tracking logging that is emitted for various events within the proxy.
                  It will also emit useful data such as latency for some events.
 --datadog-logging: This will emit the same metrics and events as debug logging to datadog metrics instead.
+--force_gcp_profiling_enabled: Enable gcp cloud profiler by force
 ```
 
 # Configuration
@@ -92,3 +94,9 @@ cargo run --bin server http local --debug-logging
 ---
 
 curl -X GET 'http://0.0.0.0:8000/v1/download_config_specs/<INSERT_SDK_KEY>.json
+
+# GCP Cloud Profiling
+
+Besides using the flag force_gcp_profiling_enabled, if you provide your statsig SDK key as an environment
+variable (STATSIG_SERVER_SDK_KEY), you can also configure a feature gate called enable_gcp_profiler_for_sfp
+to dynamically enable and disable gcp profiling.

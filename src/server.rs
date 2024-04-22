@@ -1,5 +1,10 @@
 use clap::Parser;
 use clap::ValueEnum;
+
+use datastore::config_spec_store::ConfigSpecStore;
+use datastore::data_providers::request_builder::DcsRequestBuilder;
+use datastore::data_providers::request_builder::IdlistRequestBuilder;
+use datastore::get_id_list_store::GetIdListStore;
 use datastore::{
     caching::{in_memory_cache, redis_cache},
     data_providers::{background_data_provider, http_data_provider},
@@ -7,11 +12,15 @@ use datastore::{
 };
 use loggers::datadog_logger;
 use loggers::debug_logger;
-use observers::new_dcs_observer::NewDcsObserver;
+use observers::http_data_provider_observer::HttpDataProviderObserver;
+
+use statsig::{Statsig, StatsigOptions, StatsigUser};
 
 use observers::proxy_event_observer::ProxyEventObserver;
-use observers::NewDcsObserverTrait;
+use observers::HttpDataProviderObserverTrait;
+use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub mod datastore;
 pub mod loggers;
@@ -36,11 +45,17 @@ struct Cli {
     polling_interval_in_s: u64,
     #[clap(short, long, default_value = "64")]
     update_batch_size: u64,
+    #[clap(short, long, default_value = "70")]
+    redis_leader_key_ttl: i64,
+    #[clap(long, action)]
+    force_gcp_profiling_enabled: bool,
 }
 
 #[derive(Deserialize, Debug)]
-struct Overrides {
+struct ConfigurationAndOverrides {
     statsig_endpoint: Option<String>,
+    statsig_server_sdk_key: Option<String>,
+    hostname: Option<String>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -55,17 +70,149 @@ enum CacheMode {
     Redis,
 }
 
-#[rocket::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
-    let overrides = envy::from_env::<Overrides>().expect("Envy Error");
+async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &ConfigurationAndOverrides) {
+    if config.statsig_server_sdk_key.is_some() {
+        let opts = StatsigOptions {
+            // If we are using HTTP server, we can actually be self referential
+            // to decide whether or not to enable GCP Profiling
+            api_for_download_config_specs: match cli.mode {
+                TransportMode::Grpc => "https://api.statsigcdn.com/v1".to_string(),
+                TransportMode::Http => "http://0.0.0.0:8000/v1".to_string(),
+            },
+            ..StatsigOptions::default()
+        };
+        if let Some(err) = Statsig::initialize_with_options(
+            &config
+                .statsig_server_sdk_key
+                .clone()
+                .expect("validated existence"),
+            opts,
+        )
+        .await
+        {
+            panic!("Failed to initialize statsig SDK: {}", err.message);
+        }
+    }
 
-    let shared_cache: Arc<dyn NewDcsObserverTrait + Send + Sync> = match cli.cache {
+    let mut custom_ids = HashMap::new();
+    custom_ids.insert(
+        "podID".to_string(),
+        config
+            .hostname
+            .clone()
+            .unwrap_or("no_hostname_provided".to_string()),
+    );
+    let statsig_user = Arc::new(StatsigUser::with_custom_ids(custom_ids));
+    let force_enable = cli.force_gcp_profiling_enabled;
+    cloud_profiler_rust::maybe_start_profiling(
+        "statsig-forward-proxy".to_string(),
+        std::env::var("DD_VERSION").unwrap_or("missing_dd_version".to_string()),
+        move || {
+            force_enable
+                || Statsig::check_gate(&statsig_user, "enable_gcp_profiler_for_sfp")
+                    .unwrap_or(false)
+        },
+    )
+    .await;
+}
+
+async fn create_config_spec_store(
+    cli: &Cli,
+    overrides: &ConfigurationAndOverrides,
+    background_data_provider: Arc<background_data_provider::BackgroundDataProvider>,
+    config_spec_observer: Arc<HttpDataProviderObserver>,
+    cache_uuid: &str,
+) -> Arc<ConfigSpecStore> {
+    let shared_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
         CacheMode::Local => Arc::new(in_memory_cache::InMemoryCache::new(
             cli.maximum_concurrent_sdk_keys,
         )),
-        CacheMode::Redis => Arc::new(redis_cache::RedisCache::new().await),
+        CacheMode::Redis => Arc::new(
+            redis_cache::RedisCache::new(
+                "statsig".to_string(),
+                cli.redis_leader_key_ttl,
+                cache_uuid,
+                true, /* check lcut */
+            )
+            .await,
+        ),
     };
+    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
+    let dcs_request_builder = Arc::new(DcsRequestBuilder::new(
+        overrides
+            .statsig_endpoint
+            .as_ref()
+            .map_or("https://api.statsigcdn.com".to_string(), |s| s.to_string()),
+        Arc::clone(&config_spec_observer),
+        Arc::clone(&shared_cache),
+        Arc::clone(&sdk_key_store),
+    ));
+    background_data_provider
+        .add_request_builder(dcs_request_builder)
+        .await;
+    let config_spec_store = Arc::new(datastore::config_spec_store::ConfigSpecStore::new(
+        sdk_key_store.clone(),
+        background_data_provider.clone(),
+    ));
+    config_spec_observer
+        .add_observer(sdk_key_store.clone())
+        .await;
+    config_spec_observer
+        .add_observer(config_spec_store.clone())
+        .await;
+    config_spec_observer.add_observer(shared_cache).await;
+
+    config_spec_store
+}
+
+async fn create_id_list_store(
+    cli: &Cli,
+    _overrides: &ConfigurationAndOverrides,
+    background_data_provider: Arc<background_data_provider::BackgroundDataProvider>,
+    idlist_observer: Arc<HttpDataProviderObserver>,
+    cache_uuid: &str,
+) -> Arc<GetIdListStore> {
+    let shared_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
+        CacheMode::Local => Arc::new(in_memory_cache::InMemoryCache::new(
+            cli.maximum_concurrent_sdk_keys,
+        )),
+        CacheMode::Redis => {
+            Arc::new(
+                redis_cache::RedisCache::new(
+                    "statsig_id_list".to_string(),
+                    cli.redis_leader_key_ttl,
+                    cache_uuid,
+                    false, /* check lcut */
+                )
+                .await,
+            )
+        }
+    };
+    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
+    let idlist_request_builder = Arc::new(IdlistRequestBuilder::new(
+        Arc::clone(&idlist_observer),
+        Arc::clone(&shared_cache),
+        Arc::clone(&sdk_key_store),
+    ));
+    background_data_provider
+        .add_request_builder(idlist_request_builder)
+        .await;
+    let id_list_store = Arc::new(datastore::get_id_list_store::GetIdListStore::new(
+        sdk_key_store.clone(),
+        background_data_provider.clone(),
+    ));
+    idlist_observer.add_observer(sdk_key_store.clone()).await;
+    idlist_observer.add_observer(id_list_store.clone()).await;
+    idlist_observer.add_observer(shared_cache).await;
+
+    id_list_store
+}
+
+#[rocket::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    let overrides = envy::from_env::<ConfigurationAndOverrides>().expect("Envy Error");
+    try_initialize_statsig_sdk_and_profiling(&cli, &overrides).await;
 
     if cli.datadog_logging {
         let datadog_logger = Arc::new(datadog_logger::DatadogLogger::new().await);
@@ -76,46 +223,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProxyEventObserver::add_observer(debug_logger).await;
     }
 
-    let shared_http_data_provider = Arc::new(http_data_provider::HttpDataProvider::new(
-        &overrides
-            .statsig_endpoint
-            .unwrap_or_else(|| "https://api.statsigcdn.com".to_string()),
-    ));
-    let shared_dcs_observer = Arc::new(NewDcsObserver::new());
-    let background_data_provider = background_data_provider::BackgroundDataProvider::new(
-        shared_cache.clone(),
+    let shared_http_data_provider = Arc::new(http_data_provider::HttpDataProvider::new());
+    let background_data_provider = Arc::new(background_data_provider::BackgroundDataProvider::new(
         shared_http_data_provider,
-        shared_dcs_observer.clone(),
         cli.polling_interval_in_s,
         cli.update_batch_size,
-    );
-    let shared_background_data_provider = Arc::new(background_data_provider);
-    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
-    let shared_sdk_key_store = sdk_key_store.clone();
-    let config_spec_store = datastore::config_spec_store::ConfigSpecStore::new(
-        sdk_key_store.clone(),
-        shared_background_data_provider.clone(),
-    );
-    let shared_config_spec_store = Arc::new(config_spec_store);
-    shared_dcs_observer
-        .add_observer(shared_sdk_key_store.clone())
-        .await;
-    shared_dcs_observer
-        .add_observer(shared_config_spec_store.clone())
-        .await;
-    shared_dcs_observer.add_observer(shared_cache).await;
-    shared_background_data_provider.start_background_thread(shared_sdk_key_store);
+    ));
+    let cache_uuid = Uuid::new_v4().to_string();
+    let config_spec_observer = Arc::new(HttpDataProviderObserver::new());
+    let config_spec_store = create_config_spec_store(
+        &cli,
+        &overrides,
+        Arc::clone(&background_data_provider),
+        Arc::clone(&config_spec_observer),
+        &cache_uuid,
+    )
+    .await;
+    let idlist_observer = Arc::new(HttpDataProviderObserver::new());
+    let id_list_store = create_id_list_store(
+        &cli,
+        &overrides,
+        Arc::clone(&background_data_provider),
+        Arc::clone(&idlist_observer),
+        &cache_uuid,
+    )
+    .await;
+    background_data_provider.start_background_thread().await;
 
     match cli.mode {
         TransportMode::Grpc => {
-            servers::grpc_server::GrpcServer::start_server(
-                shared_config_spec_store,
-                shared_dcs_observer,
-            )
-            .await?
+            servers::grpc_server::GrpcServer::start_server(config_spec_store, config_spec_observer)
+                .await?
         }
         TransportMode::Http => {
-            servers::http_server::HttpServer::start_server(shared_config_spec_store).await?
+            servers::http_server::HttpServer::start_server(config_spec_store, id_list_store).await?
         }
     }
     Ok(())

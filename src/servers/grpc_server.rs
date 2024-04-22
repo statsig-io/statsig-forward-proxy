@@ -5,10 +5,10 @@ use tonic::{transport::Server, Request, Response, Status};
 use crate::datastore::config_spec_store::ConfigSpecStore;
 
 use crate::datastore::{self};
-use crate::observers::new_dcs_observer::NewDcsObserver;
+use crate::observers::http_data_provider_observer::HttpDataProviderObserver;
 use crate::observers::proxy_event_observer::ProxyEventObserver;
 use crate::observers::OperationType;
-use crate::observers::{EventStat, NewDcsObserverTrait};
+use crate::observers::{EventStat, HttpDataProviderObserverTrait};
 use crate::observers::{ProxyEvent, ProxyEventType};
 use crate::servers::streaming_channel::StreamingChannel;
 use statsig_forward_proxy::statsig_forward_proxy_server::{
@@ -25,12 +25,15 @@ pub mod statsig_forward_proxy {
 
 pub struct StatsigForwardProxyServerImpl {
     config_spec_store: Arc<datastore::config_spec_store::ConfigSpecStore>,
-    dcs_observer: Arc<NewDcsObserver>,
+    dcs_observer: Arc<HttpDataProviderObserver>,
     update_broadcast_cache: Arc<RwLock<HashMap<String, Arc<StreamingChannel>>>>,
 }
 
 impl StatsigForwardProxyServerImpl {
-    fn new(config_spec_store: Arc<ConfigSpecStore>, dcs_observer: Arc<NewDcsObserver>) -> Self {
+    fn new(
+        config_spec_store: Arc<ConfigSpecStore>,
+        dcs_observer: Arc<HttpDataProviderObserver>,
+    ) -> Self {
         StatsigForwardProxyServerImpl {
             config_spec_store,
             dcs_observer,
@@ -104,7 +107,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                 .subscribe(),
             false => {
                 let sc = Arc::new(StreamingChannel::new(&sdk_key));
-                let streaming_channel_trait: Arc<dyn NewDcsObserverTrait + Send + Sync> =
+                let streaming_channel_trait: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> =
                     sc.clone();
                 self.dcs_observer
                     .add_observer(streaming_channel_trait)
@@ -206,7 +209,7 @@ pub struct GrpcServer {}
 impl GrpcServer {
     pub async fn start_server(
         config_spec_store: Arc<ConfigSpecStore>,
-        shared_dcs_observer: Arc<NewDcsObserver>,
+        shared_dcs_observer: Arc<HttpDataProviderObserver>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let addr = "[::1]:50051".parse().unwrap();
         let greeter = StatsigForwardProxyServerImpl::new(config_spec_store, shared_dcs_observer);

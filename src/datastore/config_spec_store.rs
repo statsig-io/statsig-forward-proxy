@@ -4,7 +4,7 @@ use super::sdk_key_store::SdkKeyStore;
 use crate::observers::proxy_event_observer::ProxyEventObserver;
 use crate::observers::EventStat;
 use crate::observers::OperationType;
-use crate::observers::{NewDcsObserverTrait, ProxyEvent, ProxyEventType};
+use crate::observers::{HttpDataProviderObserverTrait, ProxyEvent, ProxyEventType};
 use std::collections::HashMap;
 
 use std::sync::Arc;
@@ -25,7 +25,7 @@ pub struct ConfigSpecStore {
 
 use async_trait::async_trait;
 #[async_trait]
-impl NewDcsObserverTrait for ConfigSpecStore {
+impl HttpDataProviderObserverTrait for ConfigSpecStore {
     fn force_notifier_to_wait_for_update(&self) -> bool {
         true
     }
@@ -52,7 +52,6 @@ impl NewDcsObserverTrait for ConfigSpecStore {
         } else if result == &DataProviderRequestResult::DataAvailable {
             ProxyEventObserver::publish_event(
                 ProxyEvent::new(ProxyEventType::ConfigSpecStoreGotData, sdk_key.to_string())
-                    .with_lcut(lcut)
                     .with_stat(EventStat {
                         operation_type: OperationType::IncrByValue,
                         value: 1,
