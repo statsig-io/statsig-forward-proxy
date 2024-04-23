@@ -79,6 +79,11 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
                 )
                 .await;
             }
+        } else if result == &DataProviderRequestResult::Unauthorized {
+            let contains_key = self.data.read().await.peek(key).is_some();
+            if contains_key {
+                self.data.write().await.pop(key);
+            }
         }
     }
 

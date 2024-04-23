@@ -26,6 +26,11 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
         {
             let mut write_lock = self.keystore.write().await;
             write_lock.insert(sdk_key.to_string(), lcut);
+        } else if result == &DataProviderRequestResult::Unauthorized {
+            let contains_key = self.keystore.read().await.contains_key(sdk_key);
+            if contains_key {
+                self.keystore.write().await.remove(sdk_key);
+            }
         }
     }
 

@@ -41,6 +41,11 @@ impl HttpDataProviderObserverTrait for GetIdListStore {
                     idlists: data.clone(),
                 })),
             );
+        } else if result == &DataProviderRequestResult::Unauthorized {
+            let contains_key = self.store.read().await.contains_key(sdk_key);
+            if contains_key {
+                self.store.write().await.remove(sdk_key);
+            }
         }
     }
 

@@ -210,7 +210,58 @@ impl HttpDataProviderObserverTrait for RedisCache {
                             }),
                     )
                     .await;
-                    eprintln!("Failed to get connection to redis: {:?}", e);
+                    eprintln!(
+                        "Failed to get connection to redis, failed to update key: {:?}",
+                        e
+                    );
+                }
+            }
+        } else if result == &DataProviderRequestResult::Unauthorized {
+            let connection = self.connection.get().await;
+            let redis_key = self.hash_key(key).await;
+            match connection {
+                Ok(mut conn) => match conn.del(&redis_key).await {
+                    Ok(()) => {
+                        ProxyEventObserver::publish_event(
+                            ProxyEvent::new(
+                                ProxyEventType::RedisCacheDeleteSucceed,
+                                key.to_string(),
+                            )
+                            .with_stat(EventStat {
+                                operation_type: OperationType::IncrByValue,
+                                value: 1,
+                            }),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        ProxyEventObserver::publish_event(
+                            ProxyEvent::new(
+                                ProxyEventType::RedisCacheDeleteFailed,
+                                key.to_string(),
+                            )
+                            .with_stat(EventStat {
+                                operation_type: OperationType::IncrByValue,
+                                value: 1,
+                            }),
+                        )
+                        .await;
+                        eprintln!("Failed to delete key in redis: {:?}", e);
+                    }
+                },
+                Err(e) => {
+                    ProxyEventObserver::publish_event(
+                        ProxyEvent::new(ProxyEventType::RedisCacheDeleteFailed, key.to_string())
+                            .with_stat(EventStat {
+                                operation_type: OperationType::IncrByValue,
+                                value: 1,
+                            }),
+                    )
+                    .await;
+                    eprintln!(
+                        "Failed to get connection to redis, failed to delete key: {:?}",
+                        e
+                    );
                 }
             }
         }

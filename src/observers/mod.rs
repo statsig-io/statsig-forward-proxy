@@ -34,6 +34,8 @@ pub enum ProxyEventType {
     RedisCacheReadSucceed,
     RedisCacheReadMiss,
     RedisCacheWriteSkipped,
+    RedisCacheDeleteSucceed,
+    RedisCacheDeleteFailed,
     RedisCacheReadFailed,
     InMemoryCacheWriteSucceed,
     InMemoryCacheWriteSkipped,

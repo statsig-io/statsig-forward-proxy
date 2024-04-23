@@ -20,6 +20,7 @@ pub trait DataProviderTrait {
 pub enum DataProviderRequestResult {
     DataAvailable,
     NoDataAvailable,
+    Unauthorized,
     Error,
 }
 

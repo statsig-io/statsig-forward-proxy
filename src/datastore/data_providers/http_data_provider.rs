@@ -48,12 +48,14 @@ impl DataProviderTrait for HttpDataProvider {
         let mut err_msg: String = String::new();
         let mut body: String = String::new();
         let mut headers: HeaderMap = HeaderMap::new();
+        let mut is_unauthorized = false;
         match request_builder
             .make_request(&self.http_client, key, lcut)
             .await
         {
             Ok(response) => {
                 headers = response.headers().clone();
+                let status_code = response.status().as_u16();
                 let did_succeed = response.status().is_success();
                 match response.bytes().await {
                     Ok(raw_bytes) => {
@@ -62,6 +64,7 @@ impl DataProviderTrait for HttpDataProvider {
                         if did_succeed {
                             body = unsafe { String::from_utf8_unchecked(raw_bytes.into()) };
                         } else {
+                            is_unauthorized = status_code == 401 || status_code == 403;
                             err_msg = unsafe { String::from_utf8_unchecked(raw_bytes.into()) };
                         }
                     }
@@ -152,9 +155,16 @@ impl DataProviderTrait for HttpDataProvider {
                     }),
             )
             .await;
-            DataProviderResult {
-                result: DataProviderRequestResult::Error,
-                data: None,
+            if is_unauthorized {
+                DataProviderResult {
+                    result: DataProviderRequestResult::Unauthorized,
+                    data: None,
+                }
+            } else {
+                DataProviderResult {
+                    result: DataProviderRequestResult::Error,
+                    data: None,
+                }
             }
         }
     }

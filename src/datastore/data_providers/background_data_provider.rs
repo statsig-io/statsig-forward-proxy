@@ -4,13 +4,13 @@ use std::{collections::HashMap, sync::Arc};
 
 use futures::future::try_join_all;
 use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 
 pub struct BackgroundDataProvider {
     http_data_prover: Arc<HttpDataProvider>,
     polling_interval_in_s: u64,
     update_batch_size: u64,
-    foreground_fetch_lock: RwLock<HashMap<String, Arc<RwLock<bool>>>>,
+    foreground_fetch_lock: RwLock<HashMap<String, Arc<RwLock<Option<Instant>>>>>,
     request_builder: RwLock<Arc<Vec<Arc<dyn RequestBuilderTrait>>>>,
 }
 
@@ -26,7 +26,7 @@ pub async fn foreground_fetch(bdp: Arc<BackgroundDataProvider>, sdk_key: &str, s
                 .expect("validated existence"),
         ),
         false => {
-            let new_lock_ref: Arc<RwLock<bool>> = Arc::new(RwLock::new(false));
+            let new_lock_ref: Arc<RwLock<Option<Instant>>> = Arc::new(RwLock::new(None));
             bdp.foreground_fetch_lock
                 .write()
                 .await
@@ -35,19 +35,23 @@ pub async fn foreground_fetch(bdp: Arc<BackgroundDataProvider>, sdk_key: &str, s
         }
     };
 
-    // If already initialized, return
-    if *lock_ref.read().await {
-        return;
+    // If already initialized, and we checked in the last minute
+    // then return
+    if let Some(init_time) = *lock_ref.read().await {
+        if Instant::now().duration_since(init_time) < Duration::from_secs(60) {
+            return;
+        }
     }
-
     // Otherwise, grab write lock and set to true
     // after we finish initializing
     let mut lock = lock_ref.write().await;
-    // Someone else could have won the race, so if so
-    // just return
-    if *lock {
-        return;
+    // Someone else could have won the race, so check one more time...
+    if let Some(init_time) = *lock {
+        if Instant::now().duration_since(init_time) < Duration::from_secs(60) {
+            return;
+        }
     }
+
     // If we won the race, then initialize and set
     // has initialized to true
     let tasks = bdp
@@ -75,7 +79,7 @@ pub async fn foreground_fetch(bdp: Arc<BackgroundDataProvider>, sdk_key: &str, s
     if let Err(e) = try_join_all(tasks).await {
         eprintln!("Failed to join background data provider fetches: {:?}", e);
     }
-    *lock = true;
+    *lock = Some(Instant::now());
 }
 
 impl BackgroundDataProvider {
@@ -170,6 +174,11 @@ impl BackgroundDataProvider {
                             .notify_all(&dp_result.result, &sdk_key, lcut, &backup_data)
                             .await;
                     }
+                } else if dp_result.result == DataProviderRequestResult::Unauthorized {
+                    request_builder
+                        .get_observers()
+                        .notify_all(&dp_result.result, &sdk_key, lcut, &Arc::new("".to_string()))
+                        .await;
                 }
             });
 

@@ -77,6 +77,8 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                 w_lock.lcut = lcut;
                 w_lock.config = data.clone();
             }
+        } else if result == &DataProviderRequestResult::Unauthorized && record.is_some() {
+            self.store.write().await.remove(sdk_key);
         }
     }
 
