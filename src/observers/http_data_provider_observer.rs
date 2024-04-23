@@ -36,16 +36,18 @@ impl HttpDataProviderObserver {
         sdk_key: &str,
         lcut: u64,
         data: &Arc<String>,
+        path: &str,
     ) {
         let result_copy = *result;
         let sdk_key_copy = sdk_key.to_string();
         let data_copy = Arc::clone(data);
         let shared_observer = self.observers.clone();
+        let path_copy = path.to_string();
         task::spawn(async move {
             for observer in shared_observer.read().await.iter() {
                 if !observer.force_notifier_to_wait_for_update() {
                     observer
-                        .update(&result_copy, &sdk_key_copy, lcut, &data_copy)
+                        .update(&result_copy, &sdk_key_copy, lcut, &data_copy, &path_copy)
                         .await;
                 }
             }
@@ -53,7 +55,7 @@ impl HttpDataProviderObserver {
 
         for observer in self.observers.read().await.iter() {
             if observer.force_notifier_to_wait_for_update() {
-                observer.update(result, sdk_key, lcut, data).await;
+                observer.update(result, sdk_key, lcut, data, path).await;
             }
         }
     }

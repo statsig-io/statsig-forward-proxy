@@ -41,6 +41,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
         key: &str,
         lcut: u64,
         data: &Arc<String>,
+        path: &str,
     ) {
         if lcut > self.last_updated
             && self.key == key
@@ -48,6 +49,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
         {
             ProxyEventObserver::publish_event(
                 ProxyEvent::new(ProxyEventType::StreamingChannelGotNewData, key.to_string())
+                    .with_path(path.to_string())
                     .with_stat(EventStat {
                         operation_type: OperationType::IncrByValue,
                         value: 1,
@@ -71,7 +73,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
         }
     }
 
-    async fn get(&self, _key: &str) -> Option<Arc<String>> {
+    async fn get(&self, _key: &str, _path: &str) -> Option<Arc<String>> {
         unimplemented!("Not Used")
     }
 }

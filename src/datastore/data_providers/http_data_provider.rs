@@ -115,6 +115,7 @@ impl DataProviderTrait for HttpDataProvider {
                                     ProxyEventType::HttpDataProviderNoDataDueToBadLcut,
                                     key.to_string(),
                                 )
+                                .with_path(request_builder.get_path())
                                 .with_lcut(lcut)
                                 .with_stat(EventStat {
                                     operation_type: OperationType::Distribution,
@@ -132,6 +133,7 @@ impl DataProviderTrait for HttpDataProvider {
                 };
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(ProxyEventType::HttpDataProviderGotData, key.to_string())
+                        .with_path(request_builder.get_path())
                         .with_lcut(since_time)
                         .with_stat(EventStat {
                             operation_type: OperationType::Distribution,
@@ -148,6 +150,7 @@ impl DataProviderTrait for HttpDataProvider {
             eprintln!("Failed to get data from http provider: {:?}", err_msg);
             ProxyEventObserver::publish_event(
                 ProxyEvent::new(ProxyEventType::HttpDataProviderError, key.to_string())
+                    .with_path(request_builder.get_path())
                     .with_lcut(lcut)
                     .with_stat(EventStat {
                         operation_type: OperationType::Distribution,

@@ -118,6 +118,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
         key: &str,
         lcut: u64,
         data: &Arc<String>,
+        path: &str,
     ) {
         if result == &DataProviderRequestResult::DataAvailable {
             let connection = self.connection.get().await;
@@ -165,6 +166,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                         ProxyEventType::RedisCacheWriteSucceed,
                                         key.to_string(),
                                     )
+                                    .with_path(path.to_string())
                                     .with_stat(EventStat {
                                         operation_type: OperationType::IncrByValue,
                                         value: 1,
@@ -178,6 +180,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                         ProxyEventType::RedisCacheWriteFailed,
                                         key.to_string(),
                                     )
+                                    .with_path(path.to_string())
                                     .with_stat(EventStat {
                                         operation_type: OperationType::IncrByValue,
                                         value: 1,
@@ -193,6 +196,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                 ProxyEventType::RedisCacheWriteSkipped,
                                 key.to_string(),
                             )
+                            .with_path(path.to_string())
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -204,6 +208,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                 Err(e) => {
                     ProxyEventObserver::publish_event(
                         ProxyEvent::new(ProxyEventType::RedisCacheWriteFailed, key.to_string())
+                            .with_path(path.to_string())
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -227,6 +232,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                 ProxyEventType::RedisCacheDeleteSucceed,
                                 key.to_string(),
                             )
+                            .with_path(path.to_string())
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -240,6 +246,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                 ProxyEventType::RedisCacheDeleteFailed,
                                 key.to_string(),
                             )
+                            .with_path(path.to_string())
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -252,6 +259,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                 Err(e) => {
                     ProxyEventObserver::publish_event(
                         ProxyEvent::new(ProxyEventType::RedisCacheDeleteFailed, key.to_string())
+                            .with_path(path.to_string())
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -267,7 +275,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
         }
     }
 
-    async fn get(&self, key: &str) -> Option<Arc<String>> {
+    async fn get(&self, key: &str, path: &str) -> Option<Arc<String>> {
         let connection = self.connection.get().await;
         match connection {
             Ok(mut conn) => {
@@ -281,6 +289,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                     ProxyEventType::RedisCacheReadMiss,
                                     key.to_string(),
                                 )
+                                .with_path(path.to_string())
                                 .with_stat(EventStat {
                                     operation_type: OperationType::IncrByValue,
                                     value: 1,
@@ -294,6 +303,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                     ProxyEventType::RedisCacheReadSucceed,
                                     key.to_string(),
                                 )
+                                .with_path(path.to_string())
                                 .with_stat(EventStat {
                                     operation_type: OperationType::IncrByValue,
                                     value: 1,
@@ -306,6 +316,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                     Err(e) => {
                         ProxyEventObserver::publish_event(
                             ProxyEvent::new(ProxyEventType::RedisCacheReadFailed, key.to_string())
+                                .with_path(path.to_string())
                                 .with_stat(EventStat {
                                     operation_type: OperationType::IncrByValue,
                                     value: 1,
@@ -320,6 +331,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
             Err(e) => {
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(ProxyEventType::RedisCacheReadFailed, key.to_string())
+                        .with_path(path.to_string())
                         .with_stat(EventStat {
                             operation_type: OperationType::IncrByValue,
                             value: 1,

@@ -17,6 +17,7 @@ pub trait RequestBuilderTrait: Send + Sync + 'static {
         key: &str,
         lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error>;
+    fn get_path(&self) -> String;
     fn get_observers(&self) -> Arc<HttpDataProviderObserver>;
     fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send>;
     fn get_sdk_key_store(&self) -> Arc<SdkKeyStore>;
@@ -63,6 +64,10 @@ impl RequestBuilderTrait for DcsRequestBuilder {
         };
 
         http_client.get(url).send().await
+    }
+
+    fn get_path(&self) -> String {
+        "/v1/download_config_specs".to_string()
     }
 
     fn get_observers(&self) -> Arc<HttpDataProviderObserver> {
@@ -117,6 +122,10 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
             .header("statsig-api-key", key)
             .send()
             .await
+    }
+
+    fn get_path(&self) -> String {
+        "/v1/get_id_lists".to_string()
     }
 
     fn get_observers(&self) -> Arc<HttpDataProviderObserver> {

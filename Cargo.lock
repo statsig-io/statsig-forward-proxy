@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "statsig-forward-proxy"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "bb8",

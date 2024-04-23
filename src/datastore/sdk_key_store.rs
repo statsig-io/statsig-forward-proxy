@@ -20,6 +20,7 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
         sdk_key: &str,
         lcut: u64,
         _data: &Arc<String>,
+        _path: &str,
     ) {
         if result == &DataProviderRequestResult::DataAvailable
             || result == &DataProviderRequestResult::NoDataAvailable
@@ -34,7 +35,7 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
         }
     }
 
-    async fn get(&self, _key: &str) -> Option<Arc<String>> {
+    async fn get(&self, _key: &str, _path: &str) -> Option<Arc<String>> {
         // Not used
         None
     }

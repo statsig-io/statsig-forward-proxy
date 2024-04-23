@@ -39,6 +39,7 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
         key: &str,
         lcut: u64,
         data: &Arc<String>,
+        _path: &str,
     ) {
         if result == &DataProviderRequestResult::DataAvailable {
             if let Some(record) = self.data.read().await.peek(key) {
@@ -87,14 +88,14 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
         }
     }
 
-    async fn get(&self, key: &str) -> Option<Arc<String>> {
+    async fn get(&self, key: &str, path: &str) -> Option<Arc<String>> {
         ProxyEventObserver::publish_event(
-            ProxyEvent::new(ProxyEventType::InMemoryCacheReadSucceed, key.to_string()).with_stat(
-                EventStat {
+            ProxyEvent::new(ProxyEventType::InMemoryCacheReadSucceed, key.to_string())
+                .with_path(path.to_string())
+                .with_stat(EventStat {
                     operation_type: OperationType::IncrByValue,
                     value: 1,
-                },
-            ),
+                }),
         )
         .await;
 

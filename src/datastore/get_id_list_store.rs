@@ -31,6 +31,7 @@ impl HttpDataProviderObserverTrait for GetIdListStore {
         sdk_key: &str,
         _lcut: u64,
         data: &Arc<String>,
+        _path: &str,
     ) {
         if result == &DataProviderRequestResult::Error
             || result == &DataProviderRequestResult::DataAvailable
@@ -49,7 +50,7 @@ impl HttpDataProviderObserverTrait for GetIdListStore {
         }
     }
 
-    async fn get(&self, key: &str) -> Option<Arc<String>> {
+    async fn get(&self, key: &str, _path: &str) -> Option<Arc<String>> {
         match self.store.read().await.get(key) {
             Some(record) => Some(record.read().await.idlists.clone()),
             None => None,

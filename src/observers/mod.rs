@@ -17,8 +17,9 @@ pub trait HttpDataProviderObserverTrait {
         sdk_key: &str,
         lcut: u64,
         data: &Arc<String>,
+        path: &str,
     );
-    async fn get(&self, key: &str) -> Option<Arc<String>>;
+    async fn get(&self, key: &str, path: &str) -> Option<Arc<String>>;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -68,6 +69,7 @@ pub struct EventStat {
 pub struct ProxyEvent {
     pub event_type: ProxyEventType,
     pub sdk_key: String,
+    pub path: Option<String>,
     pub lcut: Option<u64>,
     pub stat: Option<EventStat>,
 }
@@ -77,9 +79,15 @@ impl ProxyEvent {
         ProxyEvent {
             event_type,
             sdk_key,
+            path: None,
             lcut: None,
             stat: None,
         }
+    }
+
+    pub fn with_path(mut self, path: String) -> Self {
+        self.path = Some(path);
+        self
     }
 
     pub fn with_lcut(mut self, lcut: u64) -> Self {

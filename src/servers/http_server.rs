@@ -170,6 +170,7 @@ impl HttpServer {
                                     .unwrap_or("no-key-provided")
                                     .to_string(),
                             )
+                            .with_path(req.uri().path().to_string())
                             .with_stat(EventStat {
                                 operation_type: OperationType::Distribution,
                                 value: ms,
@@ -185,6 +186,7 @@ impl HttpServer {
                                     .unwrap_or("no-key-provided")
                                     .to_string(),
                             )
+                            .with_path(req.uri().path().to_string())
                             .with_stat(EventStat {
                                 operation_type: OperationType::Distribution,
                                 value: ms,

@@ -163,21 +163,41 @@ impl BackgroundDataProvider {
                         .expect("If data is available, data must exist");
                     request_builder
                         .get_observers()
-                        .notify_all(&dp_result.result, &sdk_key, data.1, &data.0)
+                        .notify_all(
+                            &dp_result.result,
+                            &sdk_key,
+                            data.1,
+                            &data.0,
+                            &request_builder.get_path(),
+                        )
                         .await;
                 } else if dp_result.result == DataProviderRequestResult::Error {
-                    if let Some(backup_data) =
-                        request_builder.get_backup_cache().get(&sdk_key).await
+                    if let Some(backup_data) = request_builder
+                        .get_backup_cache()
+                        .get(&sdk_key, &request_builder.get_path())
+                        .await
                     {
                         request_builder
                             .get_observers()
-                            .notify_all(&dp_result.result, &sdk_key, lcut, &backup_data)
+                            .notify_all(
+                                &dp_result.result,
+                                &sdk_key,
+                                lcut,
+                                &backup_data,
+                                &request_builder.get_path(),
+                            )
                             .await;
                     }
                 } else if dp_result.result == DataProviderRequestResult::Unauthorized {
                     request_builder
                         .get_observers()
-                        .notify_all(&dp_result.result, &sdk_key, lcut, &Arc::new("".to_string()))
+                        .notify_all(
+                            &dp_result.result,
+                            &sdk_key,
+                            lcut,
+                            &Arc::new("".to_string()),
+                            &request_builder.get_path(),
+                        )
                         .await;
                 }
             });

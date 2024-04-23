@@ -1,10 +1,8 @@
 use super::data_providers::background_data_provider::{foreground_fetch, BackgroundDataProvider};
 use super::data_providers::DataProviderRequestResult;
 use super::sdk_key_store::SdkKeyStore;
-use crate::observers::proxy_event_observer::ProxyEventObserver;
-use crate::observers::EventStat;
-use crate::observers::OperationType;
-use crate::observers::{HttpDataProviderObserverTrait, ProxyEvent, ProxyEventType};
+
+use crate::observers::HttpDataProviderObserverTrait;
 use std::collections::HashMap;
 
 use std::sync::Arc;
@@ -36,6 +34,7 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
         sdk_key: &str,
         lcut: u64,
         data: &Arc<String>,
+        _path: &str,
     ) {
         let record = self.store.read().await.get(sdk_key).cloned();
         if (result == &DataProviderRequestResult::Error
@@ -50,14 +49,6 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                 })),
             );
         } else if result == &DataProviderRequestResult::DataAvailable {
-            ProxyEventObserver::publish_event(
-                ProxyEvent::new(ProxyEventType::ConfigSpecStoreGotData, sdk_key.to_string())
-                    .with_stat(EventStat {
-                        operation_type: OperationType::IncrByValue,
-                        value: 1,
-                    }),
-            )
-            .await;
             let stored_lcut = match record {
                 Some(record) => record.read().await.lcut,
                 None => 0,
@@ -82,7 +73,7 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
         }
     }
 
-    async fn get(&self, key: &str) -> Option<Arc<String>> {
+    async fn get(&self, key: &str, _path: &str) -> Option<Arc<String>> {
         match self.store.read().await.get(key) {
             Some(record) => Some(record.read().await.config.clone()),
             None => None,
