@@ -77,13 +77,13 @@ impl DatadogLogger {
 impl ProxyEventObserverTrait for DatadogLogger {
     async fn handle_event(&self, event: &ProxyEvent) {
         if let Some(stat) = &event.stat {
-            let tags = match event.lcut {
-                Some(lcut) => vec![
-                    format!("sdk_key:{}", event.sdk_key),
-                    format!("lcut:{}", lcut.to_string()),
-                ],
-                None => vec![format!("sdk_key:{}", event.sdk_key)],
-            };
+            let mut tags = vec![format!("sdk_key:{}", event.sdk_key)];
+            if let Some(lcut) = event.lcut {
+                tags.push(format!("lcut:{}", lcut));
+            }
+            if let Some(path) = &event.path {
+                tags.push(format!("path:{}", path));
+            }
             let suffix = match stat.operation_type {
                 OperationType::Distribution => "latency",
                 OperationType::Gauge => "gauge",

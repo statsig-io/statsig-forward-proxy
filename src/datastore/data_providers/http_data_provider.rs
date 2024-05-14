@@ -131,6 +131,7 @@ impl DataProviderTrait for HttpDataProvider {
                     },
                     false => 0,
                 };
+
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(ProxyEventType::HttpDataProviderGotData, key.to_string())
                         .with_path(request_builder.get_path())

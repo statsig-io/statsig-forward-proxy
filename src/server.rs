@@ -90,7 +90,7 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
         )
         .await
         {
-            panic!("Failed to initialize statsig SDK: {}", err.message);
+            panic!("Failed to initialize statsig SDK: {}", err);
         }
     }
 
