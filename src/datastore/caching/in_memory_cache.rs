@@ -24,6 +24,10 @@ impl InMemoryCache {
             ))),
         }
     }
+
+    fn get_storage_key(key: &str, path: &str) -> String {
+        format!("{}|{}", path, key)
+    }
 }
 
 use async_trait::async_trait;
@@ -39,12 +43,13 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
         key: &str,
         lcut: u64,
         data: &Arc<String>,
-        _path: &str,
+        path: &str,
     ) {
+        let storage_key = InMemoryCache::get_storage_key(key, path);
         if result == &DataProviderRequestResult::DataAvailable {
-            if let Some(record) = self.data.read().await.peek(key) {
+            if let Some(record) = self.data.read().await.peek(&storage_key) {
                 self.data.write().await.put(
-                    key.to_string(),
+                    storage_key,
                     ConfigSpecForCompany {
                         lcut,
                         config: data.clone(),
@@ -81,9 +86,9 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
                 .await;
             }
         } else if result == &DataProviderRequestResult::Unauthorized {
-            let contains_key = self.data.read().await.peek(key).is_some();
+            let contains_key = self.data.read().await.peek(&storage_key).is_some();
             if contains_key {
-                self.data.write().await.pop(key);
+                self.data.write().await.pop(&storage_key);
             }
         }
     }
@@ -102,7 +107,7 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
         self.data
             .read()
             .await
-            .peek(key)
+            .peek(&InMemoryCache::get_storage_key(key, path))
             .map(|record| record.config.clone())
     }
 }
