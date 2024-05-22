@@ -14,7 +14,7 @@ use crate::observers::{ProxyEvent, ProxyEventType};
 
 pub struct StreamingChannel {
     key: String,
-    last_updated: u64,
+    last_updated: Arc<RwLock<u64>>,
     pub sender: Arc<RwLock<Sender<ConfigSpecResponse>>>,
 }
 
@@ -23,7 +23,7 @@ impl StreamingChannel {
         let (tx, _rx) = broadcast::channel(1);
         StreamingChannel {
             key: key.to_string(),
-            last_updated: 0,
+            last_updated: Arc::new(RwLock::new(0)),
             sender: Arc::new(RwLock::new(tx)),
         }
     }
@@ -43,10 +43,8 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
         data: &Arc<String>,
         path: &str,
     ) {
-        if lcut > self.last_updated
-            && self.key == key
-            && result == &DataProviderRequestResult::DataAvailable
-        {
+        let is_newer_lcut = lcut > *self.last_updated.read().await;
+        if is_newer_lcut && self.key == key && result == &DataProviderRequestResult::DataAvailable {
             ProxyEventObserver::publish_event(
                 ProxyEvent::new(ProxyEventType::StreamingChannelGotNewData, key.to_string())
                     .with_path(path.to_string())
@@ -69,6 +67,8 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
                 // TODO: Optimize code, no receivers are listening
                 //       so we should consider removing ourselves
                 //       as a dcs observer
+            } else {
+                *self.last_updated.write().await = lcut;
             }
         }
     }

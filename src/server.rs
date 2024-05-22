@@ -60,6 +60,7 @@ struct ConfigurationAndOverrides {
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum TransportMode {
+    GrpcAndHttp,
     Grpc,
     Http,
 }
@@ -78,6 +79,7 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
             api_for_download_config_specs: match cli.mode {
                 TransportMode::Grpc => "https://api.statsigcdn.com/v1".to_string(),
                 TransportMode::Http => "http://0.0.0.0:8000/v1".to_string(),
+                TransportMode::GrpcAndHttp => "http://0.0.0.0:8000/v1".to_string(),
             },
             ..StatsigOptions::default()
         };
@@ -137,7 +139,9 @@ async fn create_config_spec_store(
             .await,
         ),
     };
-    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
+    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new(
+        "/v1/download_config_specs".to_string(),
+    ));
     let dcs_request_builder = Arc::new(DcsRequestBuilder::new(
         overrides
             .statsig_endpoint
@@ -188,7 +192,9 @@ async fn create_id_list_store(
             )
         }
     };
-    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
+    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new(
+        "/v1/get_id_lists".to_string(),
+    ));
     let idlist_request_builder = Arc::new(IdlistRequestBuilder::new(
         Arc::clone(&idlist_observer),
         Arc::clone(&shared_cache),
@@ -257,6 +263,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         TransportMode::Http => {
             servers::http_server::HttpServer::start_server(config_spec_store, id_list_store).await?
+        }
+        TransportMode::GrpcAndHttp => {
+            let grpc_server = servers::grpc_server::GrpcServer::start_server(
+                config_spec_store.clone(),
+                config_spec_observer.clone(),
+            );
+            let http_server =
+                servers::http_server::HttpServer::start_server(config_spec_store, id_list_store);
+
+            tokio::select! {
+                res = grpc_server => {
+                    if let Err(err) = res {
+                        eprintln!("gRPC server failed: {}, terminating server...", err);
+                    }
+                }
+                res = http_server => {
+                    if let Err(err) = res {
+                        eprintln!("HTTP server failed: {}, terminating server...", err);
+                    }
+                }
+            }
         }
     }
     Ok(())

@@ -30,6 +30,7 @@ tokio-stream = "0.1.15"
 cloud_profiler_rust = "1.0.5"
 statsig = "0.3.0"
 uuid = { version="1.8.0", features = ["v4", "fast-rng"] }
+chrono = "0.4.38"
 
 
 [build-dependencies]

@@ -3,6 +3,7 @@ use crate::observers::{
     proxy_event_observer::ProxyEventObserver, HttpDataProviderObserverTrait, ProxyEvent,
     ProxyEventType,
 };
+use crate::observers::{EventStat, OperationType};
 use async_trait::async_trait;
 use std::collections::hash_map::IntoIter;
 use std::collections::HashMap;
@@ -20,13 +21,16 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
         sdk_key: &str,
         lcut: u64,
         _data: &Arc<String>,
-        _path: &str,
+        path: &str,
     ) {
-        if result == &DataProviderRequestResult::DataAvailable
-            || result == &DataProviderRequestResult::NoDataAvailable
-        {
+        if result == &DataProviderRequestResult::DataAvailable {
             let mut write_lock = self.keystore.write().await;
-            write_lock.insert(sdk_key.to_string(), lcut);
+            if path.eq("/v1/get_id_lists")
+                || (path.eq("/v1/download_config_specs")
+                    && *write_lock.get(sdk_key).unwrap_or(&0) < lcut)
+            {
+                write_lock.insert(sdk_key.to_string(), lcut);
+            }
         } else if result == &DataProviderRequestResult::Unauthorized {
             let contains_key = self.keystore.read().await.contains_key(sdk_key);
             if contains_key {
@@ -42,18 +46,14 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
 }
 
 pub struct SdkKeyStore {
+    path: String,
     keystore: Arc<RwLock<HashMap<String, u64>>>,
 }
 
-impl Default for SdkKeyStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SdkKeyStore {
-    pub fn new() -> SdkKeyStore {
+    pub fn new(path: String) -> SdkKeyStore {
         SdkKeyStore {
+            path,
             keystore: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -61,18 +61,22 @@ impl SdkKeyStore {
     pub async fn has_key(&self, key: &str, _since_time: u64) -> bool {
         match self.keystore.read().await.contains_key(key) {
             true => {
-                ProxyEventObserver::publish_event(ProxyEvent::new(
-                    ProxyEventType::SdkKeyStoreCacheHit,
-                    key.to_string(),
-                ))
+                ProxyEventObserver::publish_event(
+                    ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheHit, key.to_string())
+                        .with_path(self.path.clone()),
+                )
                 .await;
                 true
             }
             false => {
-                ProxyEventObserver::publish_event(ProxyEvent::new(
-                    ProxyEventType::SdkKeyStoreCacheMiss,
-                    key.to_string(),
-                ))
+                ProxyEventObserver::publish_event(
+                    ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheMiss, key.to_string())
+                        .with_path(self.path.clone())
+                        .with_stat(EventStat {
+                            operation_type: OperationType::IncrByValue,
+                            value: 1,
+                        }),
+                )
                 .await;
                 false
             }

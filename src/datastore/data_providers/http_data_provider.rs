@@ -89,6 +89,7 @@ impl DataProviderTrait for HttpDataProvider {
             if body == "{\"has_updates\":false}" {
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(ProxyEventType::HttpDataProviderNoData, key.to_string())
+                        .with_path(request_builder.get_path())
                         .with_stat(EventStat {
                             operation_type: OperationType::Distribution,
                             value: ms,

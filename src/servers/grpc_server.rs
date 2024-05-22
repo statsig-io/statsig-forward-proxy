@@ -211,7 +211,7 @@ impl GrpcServer {
         config_spec_store: Arc<ConfigSpecStore>,
         shared_dcs_observer: Arc<HttpDataProviderObserver>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let addr = "[::1]:50051".parse().unwrap();
+        let addr = "0.0.0.0:50051".parse().unwrap();
         let greeter = StatsigForwardProxyServerImpl::new(config_spec_store, shared_dcs_observer);
         println!("GrpcServer listening on {}", addr);
 

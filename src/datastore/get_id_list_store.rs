@@ -74,7 +74,13 @@ impl GetIdListStore {
         if !self.sdk_key_store.has_key(sdk_key, 0).await {
             // Since it's a cache-miss, just fill with a full payload
             // and check if we should return no update manually
-            foreground_fetch(self.background_data_provider.clone(), sdk_key, 0).await;
+            foreground_fetch(
+                self.background_data_provider.clone(),
+                sdk_key,
+                0,
+                self.sdk_key_store.clone(),
+            )
+            .await;
         }
 
         self.store.read().await.get(sdk_key).cloned()

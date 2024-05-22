@@ -1,3 +1,5 @@
+use crate::datastore::sdk_key_store::SdkKeyStore;
+
 use super::request_builder::RequestBuilderTrait;
 use super::{http_data_provider::HttpDataProvider, DataProviderRequestResult, DataProviderTrait};
 use std::{collections::HashMap, sync::Arc};
@@ -14,40 +16,32 @@ pub struct BackgroundDataProvider {
     request_builder: RwLock<Arc<Vec<Arc<dyn RequestBuilderTrait>>>>,
 }
 
-pub async fn foreground_fetch(bdp: Arc<BackgroundDataProvider>, sdk_key: &str, since_time: u64) {
+pub async fn foreground_fetch(
+    bdp: Arc<BackgroundDataProvider>,
+    sdk_key: &str,
+    since_time: u64,
+    sdk_key_store: Arc<SdkKeyStore>,
+) {
     let key = format!("{}|{}", sdk_key, since_time);
-    let contains_key = bdp.foreground_fetch_lock.read().await.contains_key(&key);
-    let lock_ref = match contains_key {
-        true => Arc::clone(
-            bdp.foreground_fetch_lock
-                .read()
-                .await
-                .get(&key)
-                .expect("validated existence"),
-        ),
+    let mut master_lock = bdp.foreground_fetch_lock.write().await;
+    let lock_ref: Arc<RwLock<Option<Instant>>> = match master_lock.contains_key(&key) {
+        true => Arc::clone(master_lock.get(&key).expect("validated existence")),
         false => {
             let new_lock_ref: Arc<RwLock<Option<Instant>>> = Arc::new(RwLock::new(None));
-            bdp.foreground_fetch_lock
-                .write()
-                .await
-                .insert(key.clone(), Arc::clone(&new_lock_ref));
+            master_lock.insert(key.clone(), Arc::clone(&new_lock_ref));
             new_lock_ref
         }
     };
+    // Explicitly drop the master lock to allow other sdk keys to be processed
+    drop(master_lock);
 
     // If already initialized, and we checked in the last minute
     // then return
-    if let Some(init_time) = *lock_ref.read().await {
-        if Instant::now().duration_since(init_time) < Duration::from_secs(60) {
-            return;
-        }
-    }
-    // Otherwise, grab write lock and set to true
-    // after we finish initializing
-    let mut lock = lock_ref.write().await;
-    // Someone else could have won the race, so check one more time...
-    if let Some(init_time) = *lock {
-        if Instant::now().duration_since(init_time) < Duration::from_secs(60) {
+    let mut per_key_lock = lock_ref.write().await;
+    if let Some(init_time) = *per_key_lock {
+        if !sdk_key_store.has_key(sdk_key, since_time).await
+            && Instant::now().duration_since(init_time) < Duration::from_secs(60)
+        {
             return;
         }
     }
@@ -79,7 +73,7 @@ pub async fn foreground_fetch(bdp: Arc<BackgroundDataProvider>, sdk_key: &str, s
     if let Err(e) = try_join_all(tasks).await {
         eprintln!("Failed to join background data provider fetches: {:?}", e);
     }
-    *lock = Some(Instant::now());
+    *per_key_lock = Some(Instant::now());
 }
 
 impl BackgroundDataProvider {
@@ -155,22 +149,30 @@ impl BackgroundDataProvider {
             let request_builder = request_builder.clone();
             let join_handle = tokio::task::spawn(async move {
                 let dp_result = data_provider.get(&request_builder, &sdk_key, lcut).await;
-                if dp_result.result == DataProviderRequestResult::NoDataAvailable
-                    || dp_result.result == DataProviderRequestResult::DataAvailable
-                {
+                if dp_result.result == DataProviderRequestResult::DataAvailable {
                     let data = dp_result
                         .data
                         .expect("If data is available, data must exist");
-                    request_builder
-                        .get_observers()
-                        .notify_all(
-                            &dp_result.result,
-                            &sdk_key,
-                            data.1,
-                            &data.0,
-                            &request_builder.get_path(),
-                        )
-                        .await;
+
+                    // [For DCS] Occassionally, origin will return the same payload multiple times
+                    // This could happen from cache inconsistency. If this happens,
+                    // rather than notifying, just skip updating anyone.
+                    //
+                    // This allows all listeners to not worry about doing double work
+                    if !request_builder.should_check_lcut_before_notifying_observers()
+                        || lcut != data.1
+                    {
+                        request_builder
+                            .get_observers()
+                            .notify_all(
+                                &dp_result.result,
+                                &sdk_key,
+                                data.1,
+                                &data.0,
+                                &request_builder.get_path(),
+                            )
+                            .await;
+                    }
                 } else if dp_result.result == DataProviderRequestResult::Error {
                     if let Some(backup_data) = request_builder
                         .get_backup_cache()

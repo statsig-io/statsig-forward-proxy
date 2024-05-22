@@ -22,6 +22,7 @@ pub trait RequestBuilderTrait: Send + Sync + 'static {
     fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send>;
     fn get_sdk_key_store(&self) -> Arc<SdkKeyStore>;
     async fn should_make_request(&self) -> bool;
+    fn should_check_lcut_before_notifying_observers(&self) -> bool;
 }
 
 pub struct DcsRequestBuilder {
@@ -83,6 +84,10 @@ impl RequestBuilderTrait for DcsRequestBuilder {
     }
 
     async fn should_make_request(&self) -> bool {
+        true
+    }
+
+    fn should_check_lcut_before_notifying_observers(&self) -> bool {
         true
     }
 }
@@ -148,6 +153,10 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
             *self.last_request.write().await = Instant::now();
             return true;
         }
+        false
+    }
+
+    fn should_check_lcut_before_notifying_observers(&self) -> bool {
         false
     }
 }
