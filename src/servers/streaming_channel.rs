@@ -43,7 +43,8 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
         data: &Arc<String>,
         path: &str,
     ) {
-        let is_newer_lcut = lcut > *self.last_updated.read().await;
+        let mut wlock = self.last_updated.write().await;
+        let is_newer_lcut = lcut > *wlock;
         if is_newer_lcut && self.key == key && result == &DataProviderRequestResult::DataAvailable {
             ProxyEventObserver::publish_event(
                 ProxyEvent::new(ProxyEventType::StreamingChannelGotNewData, key.to_string())
@@ -68,7 +69,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
                 //       so we should consider removing ourselves
                 //       as a dcs observer
             } else {
-                *self.last_updated.write().await = lcut;
+                *wlock = lcut;
             }
         }
     }

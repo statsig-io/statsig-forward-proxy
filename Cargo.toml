@@ -27,7 +27,7 @@ dogstatsd = "0.11.1"
 lru = "0.12.3"
 cached = { version = "0.51.3", features = ["proc_macro", "async", "async_tokio_rt_multi_thread"] }
 tokio-stream = "0.1.15"
-cloud_profiler_rust = "1.0.5"
+cloud_profiler_rust = "1.1.1"
 statsig = "0.3.0"
 uuid = { version="1.8.0", features = ["v4", "fast-rng"] }
 chrono = "0.4.38"

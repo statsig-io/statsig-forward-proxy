@@ -125,6 +125,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
         http_client
             .post("https://api.statsig.com/v1/get_id_lists".to_string())
             .header("statsig-api-key", key)
+            .body("{}".to_string())
             .send()
             .await
     }
