@@ -89,16 +89,9 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
 
         // Re-use broadcast channel if its already been created for
         // a given sdk key
-        let contains_key = self
-            .update_broadcast_cache
-            .read()
-            .await
-            .contains_key(&sdk_key);
-        let mut rc = match contains_key {
-            true => self
-                .update_broadcast_cache
-                .read()
-                .await
+        let mut wlock = self.update_broadcast_cache.write().await;
+        let mut rc = match wlock.contains_key(&sdk_key) {
+            true => wlock
                 .get(&sdk_key)
                 .expect("We did a key check")
                 .sender
@@ -113,13 +106,11 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                     .add_observer(streaming_channel_trait)
                     .await;
                 let rv = sc.sender.read().await.subscribe();
-                self.update_broadcast_cache
-                    .write()
-                    .await
-                    .insert(sdk_key.to_string(), sc);
+                wlock.insert(sdk_key.to_string(), sc);
                 rv
             }
         };
+        drop(wlock);
 
         // After initial response, then start listening for updates
         let ubc_ref = Arc::clone(&self.update_broadcast_cache);
