@@ -15,7 +15,7 @@ use crate::observers::{ProxyEvent, ProxyEventType};
 pub struct StreamingChannel {
     key: String,
     last_updated: Arc<RwLock<u64>>,
-    pub sender: Arc<RwLock<Sender<ConfigSpecResponse>>>,
+    pub sender: Arc<RwLock<Sender<Option<ConfigSpecResponse>>>>,
 }
 
 impl StreamingChannel {
@@ -59,10 +59,10 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
                 .sender
                 .write()
                 .await
-                .send(ConfigSpecResponse {
+                .send(Some(ConfigSpecResponse {
                     spec: data.to_string(),
                     last_updated: lcut,
-                })
+                }))
                 .is_err()
             {
                 // TODO: Optimize code, no receivers are listening

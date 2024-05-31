@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use std::{sync::Arc, time::Duration};
+use sha2::{Digest, Sha256};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, time::Instant};
 
 use crate::{
@@ -18,6 +19,7 @@ pub trait RequestBuilderTrait: Send + Sync + 'static {
         lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error>;
     fn get_path(&self) -> String;
+    async fn is_an_update(&self, body: &str, sdk_key: &str) -> bool;
     fn get_observers(&self) -> Arc<HttpDataProviderObserver>;
     fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send>;
     fn get_sdk_key_store(&self) -> Arc<SdkKeyStore>;
@@ -71,6 +73,11 @@ impl RequestBuilderTrait for DcsRequestBuilder {
         "/v1/download_config_specs".to_string()
     }
 
+    async fn is_an_update(&self, body: &str, _sdk_key: &str) -> bool {
+        // TODO: This should be more robust
+        !body.eq("{\"has_updates\":false}")
+    }
+
     fn get_observers(&self) -> Arc<HttpDataProviderObserver> {
         Arc::clone(&self.http_observers)
     }
@@ -97,6 +104,7 @@ pub struct IdlistRequestBuilder {
     pub backup_cache: Arc<dyn HttpDataProviderObserverTrait + Sync + Send>,
     pub sdk_key_store: Arc<SdkKeyStore>,
     last_request: RwLock<Instant>,
+    last_response_hash: RwLock<HashMap<String, String>>,
 }
 
 impl IdlistRequestBuilder {
@@ -110,6 +118,7 @@ impl IdlistRequestBuilder {
             backup_cache,
             sdk_key_store,
             last_request: RwLock::new(Instant::now()),
+            last_response_hash: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -132,6 +141,21 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
 
     fn get_path(&self) -> String {
         "/v1/get_id_lists".to_string()
+    }
+
+    async fn is_an_update(&self, body: &str, sdk_key: &str) -> bool {
+        let hash = format!("{:x}", Sha256::digest(body));
+        let mut wlock = self.last_response_hash.write().await;
+        let mut is_an_update = true;
+        if let Some(old_hash) = wlock.get(sdk_key) {
+            is_an_update = hash != *old_hash;
+        }
+
+        if is_an_update {
+            wlock.insert(sdk_key.to_string(), hash);
+        }
+
+        is_an_update
     }
 
     fn get_observers(&self) -> Arc<HttpDataProviderObserver> {

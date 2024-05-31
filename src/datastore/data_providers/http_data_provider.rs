@@ -85,8 +85,7 @@ impl DataProviderTrait for HttpDataProvider {
                 Err(_err) => -2,
             };
         if err_msg.is_empty() {
-            // TODO: This should be more robust
-            if body == "{\"has_updates\":false}" {
+            if !request_builder.is_an_update(&body, key).await {
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(ProxyEventType::HttpDataProviderNoData, key.to_string())
                         .with_path(request_builder.get_path())

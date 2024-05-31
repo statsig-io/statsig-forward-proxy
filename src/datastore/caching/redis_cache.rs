@@ -121,26 +121,41 @@ impl HttpDataProviderObserverTrait for RedisCache {
         path: &str,
     ) {
         if result == &DataProviderRequestResult::DataAvailable {
-            let connection = self.connection.get().await;
+            let connection: Result<
+                bb8::PooledConnection<RedisConnectionManager>,
+                bb8::RunError<RedisError>,
+            > = self.connection.get().await;
             let redis_key = self.hash_key(key).await;
             match connection {
                 Ok(mut conn) => {
                     let mut pipe = redis::pipe();
                     pipe.atomic();
                     let should_update = match pipe
+                        .ttl(REDIS_LEADER_KEY)
                         .set_nx(REDIS_LEADER_KEY, self.uuid.clone())
                         .get(REDIS_LEADER_KEY)
                         .hget(&redis_key, "lcut")
-                        .query_async::<MultiplexedConnection, (i32, String, Option<String>)>(
+                        .query_async::<MultiplexedConnection, (i32, i32, String, Option<String>)>(
                             &mut *conn,
                         )
                         .await
                     {
                         Ok(query_result) => {
-                            let is_leader = query_result.1 == self.uuid;
-                            if self.check_lcut && query_result.2.is_some() {
+                            let is_leader = query_result.2 == self.uuid;
+
+                            // Incase there was a crash without cleaning up the leader key
+                            // validate on startup, and set expiry if needed. THis is best
+                            // effort, so we don't check result
+                            if query_result.0 == -1 && !is_leader {
+                                pipe.expire::<&str>(REDIS_LEADER_KEY, self.leader_key_ttl)
+                                    .query_async::<MultiplexedConnection, i32>(&mut *conn)
+                                    .await
+                                    .ok();
+                            }
+
+                            if self.check_lcut && query_result.3.is_some() {
                                 let should_update =
-                                    query_result.2.expect("exists").parse().unwrap_or(0) < lcut;
+                                    query_result.3.expect("exists").parse().unwrap_or(0) < lcut;
                                 is_leader && should_update
                             } else {
                                 is_leader

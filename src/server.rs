@@ -10,6 +10,7 @@ use datastore::{
     data_providers::{background_data_provider, http_data_provider},
     sdk_key_store,
 };
+use futures::join;
 use loggers::datadog_logger;
 use loggers::debug_logger;
 use observers::http_data_provider_observer::HttpDataProviderObserver;
@@ -49,6 +50,8 @@ struct Cli {
     redis_leader_key_ttl: i64,
     #[clap(long, action)]
     force_gcp_profiling_enabled: bool,
+    #[clap(short, long, default_value = "500")]
+    grpc_max_concurrent_streams: u32,
 }
 
 #[derive(Deserialize, Debug)]
@@ -258,32 +261,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.mode {
         TransportMode::Grpc => {
-            servers::grpc_server::GrpcServer::start_server(config_spec_store, config_spec_observer)
-                .await?
+            servers::grpc_server::GrpcServer::start_server(
+                cli.grpc_max_concurrent_streams,
+                config_spec_store,
+                config_spec_observer,
+            )
+            .await?
         }
         TransportMode::Http => {
             servers::http_server::HttpServer::start_server(config_spec_store, id_list_store).await?
         }
         TransportMode::GrpcAndHttp => {
             let grpc_server = servers::grpc_server::GrpcServer::start_server(
+                cli.grpc_max_concurrent_streams,
                 config_spec_store.clone(),
                 config_spec_observer.clone(),
             );
             let http_server =
                 servers::http_server::HttpServer::start_server(config_spec_store, id_list_store);
-
-            tokio::select! {
-                res = grpc_server => {
-                    if let Err(err) = res {
-                        eprintln!("gRPC server failed: {}, terminating server...", err);
-                    }
-                }
-                res = http_server => {
-                    if let Err(err) = res {
-                        eprintln!("HTTP server failed: {}, terminating server...", err);
-                    }
-                }
-            }
+            join!(async { grpc_server.await.ok() }, async {
+                http_server.await.ok()
+            },);
         }
     }
     Ok(())

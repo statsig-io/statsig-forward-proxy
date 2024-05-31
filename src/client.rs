@@ -30,14 +30,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         since_time: Some(1234),
         sdk_key: "1234".into(),
     });
-    let mut stream = client.stream_config_spec(request).await?.into_inner();
-    while let Some(value) = stream.message().await? {
-        println!(
-            "STREAMING={:?}, CURRENT TIME={}",
-            value.last_updated,
-            Local::now()
-        );
-    }
+    let response = client.stream_config_spec(request).await?;
+    println!("Metadata={:?}", response.metadata());
+    let mut stream = response.into_inner();
 
+    loop {
+        match stream.message().await {
+            Ok(Some(value)) => {
+                println!(
+                    "STREAMING={:?}, CURRENT TIME={}",
+                    value.last_updated,
+                    Local::now()
+                );
+            }
+            Ok(None) => {
+                println!("STREAMING DONE");
+                break;
+            }
+            Err(e) => {
+                println!("CURRENT TIME={}", Local::now());
+                println!("Error={:?}", e);
+                break;
+            }
+        }
+    }
     Ok(())
 }

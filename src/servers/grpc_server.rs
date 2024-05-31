@@ -1,4 +1,5 @@
 use tokio::sync::{mpsc, RwLock};
+
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -15,6 +16,9 @@ use statsig_forward_proxy::statsig_forward_proxy_server::{
     StatsigForwardProxy, StatsigForwardProxyServer,
 };
 use statsig_forward_proxy::{ConfigSpecRequest, ConfigSpecResponse};
+use std::env;
+use std::str::FromStr;
+use tonic::metadata::MetadataValue;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,11 +37,12 @@ impl StatsigForwardProxyServerImpl {
     fn new(
         config_spec_store: Arc<ConfigSpecStore>,
         dcs_observer: Arc<HttpDataProviderObserver>,
+        update_broadcast_cache: Arc<RwLock<HashMap<String, Arc<StreamingChannel>>>>,
     ) -> Self {
         StatsigForwardProxyServerImpl {
             config_spec_store,
             dcs_observer,
-            update_broadcast_cache: Arc::new(RwLock::new(HashMap::new())),
+            update_broadcast_cache,
         }
     }
 }
@@ -115,63 +120,41 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         // After initial response, then start listening for updates
         let ubc_ref = Arc::clone(&self.update_broadcast_cache);
         tokio::spawn(async move {
-            match tx.send(Ok(init_value)).await {
-                Ok(_) => {
-                    ProxyEventObserver::publish_event(
-                        ProxyEvent::new(
-                            ProxyEventType::GrpcStreamingStreamedInitialized,
-                            sdk_key.to_string(),
-                        )
-                        .with_stat(EventStat {
-                            operation_type: OperationType::IncrByValue,
-                            value: 1,
-                        }),
-                    )
-                    .await;
-                }
-                Err(_e) => {
-                    ProxyEventObserver::publish_event(
-                        ProxyEvent::new(
-                            ProxyEventType::GrpcStreamingStreamDisconnected,
-                            sdk_key.to_string(),
-                        )
-                        .with_stat(EventStat {
-                            operation_type: OperationType::IncrByValue,
-                            value: 1,
-                        }),
-                    )
-                    .await;
-                }
-            }
+            tx.send(Ok(init_value)).await.ok();
+            ProxyEventObserver::publish_event(
+                ProxyEvent::new(
+                    ProxyEventType::GrpcStreamingStreamedInitialized,
+                    sdk_key.to_string(),
+                )
+                .with_stat(EventStat {
+                    operation_type: OperationType::IncrByValue,
+                    value: 1,
+                }),
+            )
+            .await;
 
             loop {
                 match rc.recv().await {
-                    Ok(csr) => match tx.send(Ok(csr)).await {
-                        Ok(_) => {
-                            ProxyEventObserver::publish_event(
-                                ProxyEvent::new(
-                                    ProxyEventType::GrpcStreamingStreamedResponse,
-                                    sdk_key.to_string(),
+                    Ok(maybe_csr) => match maybe_csr {
+                        Some(csr) => match tx.send(Ok(csr)).await {
+                            Ok(_) => {
+                                ProxyEventObserver::publish_event(
+                                    ProxyEvent::new(
+                                        ProxyEventType::GrpcStreamingStreamedResponse,
+                                        sdk_key.to_string(),
+                                    )
+                                    .with_stat(EventStat {
+                                        operation_type: OperationType::IncrByValue,
+                                        value: 1,
+                                    }),
                                 )
-                                .with_stat(EventStat {
-                                    operation_type: OperationType::IncrByValue,
-                                    value: 1,
-                                }),
-                            )
-                            .await;
-                        }
-                        Err(_e) => {
-                            ProxyEventObserver::publish_event(
-                                ProxyEvent::new(
-                                    ProxyEventType::GrpcStreamingStreamDisconnected,
-                                    sdk_key.to_string(),
-                                )
-                                .with_stat(EventStat {
-                                    operation_type: OperationType::IncrByValue,
-                                    value: 1,
-                                }),
-                            )
-                            .await;
+                                .await;
+                            }
+                            Err(_e) => {
+                                break;
+                            }
+                        },
+                        None => {
                             break;
                         }
                     },
@@ -189,26 +172,77 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                     }
                 }
             }
+
+            ProxyEventObserver::publish_event(
+                ProxyEvent::new(
+                    ProxyEventType::GrpcStreamingStreamDisconnected,
+                    sdk_key.to_string(),
+                )
+                .with_stat(EventStat {
+                    operation_type: OperationType::IncrByValue,
+                    value: 1,
+                }),
+            )
+            .await;
         });
 
-        Ok(Response::new(ReceiverStream::new(rx)))
+        let mut response = Response::new(ReceiverStream::new(rx));
+        response.metadata_mut().insert(
+            "x-sfp-hostname",
+            MetadataValue::from_str(&env::var("HOSTNAME").unwrap_or("no_hostname_set".to_string()))
+                .unwrap(),
+        );
+        Ok(response)
     }
 }
 
 pub struct GrpcServer {}
 
 impl GrpcServer {
+    async fn shutdown_signal(
+        update_broadcast_cache: Arc<RwLock<HashMap<String, Arc<StreamingChannel>>>>,
+    ) {
+        let mut int_stream =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .expect("Failed to install SIGINT handler");
+        let mut term_stream =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to install SIGTERM handler");
+        tokio::select! {
+            _ = int_stream.recv() => {
+                println!("Received SIGINT, terminating...");
+            }
+            _ = term_stream.recv() => {
+                println!("Received SIGTERM, terminating...");
+            }
+        };
+
+        let wlock = update_broadcast_cache.write().await;
+
+        for (_, sc) in wlock.iter() {
+            sc.sender.write().await.send(None).ok();
+        }
+        println!("All grpc streams terminated, shutting down...");
+    }
+
     pub async fn start_server(
+        max_concurrent_streams: u32,
         config_spec_store: Arc<ConfigSpecStore>,
         shared_dcs_observer: Arc<HttpDataProviderObserver>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let addr = "0.0.0.0:50051".parse().unwrap();
-        let greeter = StatsigForwardProxyServerImpl::new(config_spec_store, shared_dcs_observer);
-        println!("GrpcServer listening on {}", addr);
+        let update_broadcast_cache = Arc::new(RwLock::new(HashMap::new()));
+        let sfp_server = StatsigForwardProxyServerImpl::new(
+            config_spec_store,
+            shared_dcs_observer,
+            update_broadcast_cache.clone(),
+        );
 
+        println!("GrpcServer listening on {}", addr);
         Server::builder()
-            .add_service(StatsigForwardProxyServer::new(greeter))
-            .serve(addr)
+            .max_concurrent_streams(max_concurrent_streams)
+            .add_service(StatsigForwardProxyServer::new(sfp_server))
+            .serve_with_shutdown(addr, GrpcServer::shutdown_signal(update_broadcast_cache))
             .await?;
 
         Ok(())
