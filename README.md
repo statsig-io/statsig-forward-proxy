@@ -24,16 +24,19 @@ You could optionally build your own binary, however, we have provided a pre-buil
 Usage: server [OPTIONS] <MODE> <CACHE>
 
 Arguments:
-  <MODE>   [possible values: grpc, http]
+  <MODE>   [possible values: grpc-and-http, grpc, http]
   <CACHE>  [possible values: local, redis]
 
 Options:
       --datadog-logging
       --debug-logging
-      --force_gcp_profiling_enabled
   -m, --maximum-concurrent-sdk-keys <MAXIMUM_CONCURRENT_SDK_KEYS>  [default: 1000]
   -p, --polling-interval-in-s <POLLING_INTERVAL_IN_S>              [default: 10]
   -u, --update-batch-size <UPDATE_BATCH_SIZE>                      [default: 64]
+  -r, --redis-leader-key-ttl <REDIS_LEADER_KEY_TTL>                [default: 70]
+      --force-gcp-profiling-enabled
+  -g, --grpc-max-concurrent-streams <GRPC_MAX_CONCURRENT_STREAMS>  [default: 500]
+      --clear-external-datastore-on-unauthorized
   -h, --help                                                       Print help
   -V, --version                                                    Print version
 ```
