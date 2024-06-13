@@ -52,6 +52,12 @@ struct Cli {
     force_gcp_profiling_enabled: bool,
     #[clap(short, long, default_value = "500")]
     grpc_max_concurrent_streams: u32,
+    // If you set this flag, you do not need an external process
+    // to clean up the external datastore if your key becomes unauthorized.
+    // The downside is that if there are issues with auth upstream, you might create
+    // inavailability of the config.
+    #[clap(long, action)]
+    clear_external_datastore_on_unauthorized: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -138,6 +144,7 @@ async fn create_config_spec_store(
                 cli.redis_leader_key_ttl,
                 cache_uuid,
                 true, /* check lcut */
+                cli.clear_external_datastore_on_unauthorized,
             )
             .await,
         ),
@@ -190,6 +197,7 @@ async fn create_id_list_store(
                     cli.redis_leader_key_ttl,
                     cache_uuid,
                     false, /* check lcut */
+                    cli.clear_external_datastore_on_unauthorized,
                 )
                 .await,
             )

@@ -4,6 +4,7 @@ use crate::datastore::get_id_list_store::GetIdListStore;
 use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{ProxyEvent, ProxyEventType};
+use crate::servers::http_apis;
 use rocket::fairing::AdHoc;
 use rocket::http::{Header, Status};
 use rocket::post;
@@ -123,7 +124,10 @@ impl HttpServer {
                 routes![
                     get_download_config_specs,
                     post_download_config_specs,
-                    post_get_id_lists
+                    post_get_id_lists,
+                    http_apis::healthchecks::startup,
+                    http_apis::healthchecks::ready,
+                    http_apis::healthchecks::health,
                 ],
             )
             .manage(config_spec_store)

@@ -131,12 +131,25 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
         key: &str,
         _lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error> {
-        http_client
+        match http_client
             .post("https://api.statsig.com/v1/get_id_lists".to_string())
             .header("statsig-api-key", key)
             .body("{}".to_string())
             .send()
             .await
+        {
+            Ok(response) => {
+                let status_code = response.status().as_u16();
+                // If unauthorized, remove key from last response hash such that
+                // we will reload data into memory if for some reason the key is
+                // re-authorized
+                if status_code == 401 || status_code == 403 {
+                    self.last_response_hash.write().await.remove(key);
+                }
+                Ok(response)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn get_path(&self) -> String {

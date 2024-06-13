@@ -26,6 +26,7 @@ pub struct RedisCache {
     uuid: String,
     leader_key_ttl: i64,
     check_lcut: bool,
+    clear_external_datastore_on_unauthorized: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -47,6 +48,7 @@ impl RedisCache {
         leader_key_ttl: i64,
         uuid: &str,
         check_lcut: bool,
+        clear_external_datastore_on_unauthorized: bool,
     ) -> Self {
         let config = envy::from_env::<RedisEnvConfig>().expect("Malformed config");
         let protocol = match config.redis_tls.is_some_and(|x| x) {
@@ -80,6 +82,7 @@ impl RedisCache {
             uuid: uuid.to_string(),
             leader_key_ttl,
             check_lcut,
+            clear_external_datastore_on_unauthorized,
         }
     }
 
@@ -236,7 +239,9 @@ impl HttpDataProviderObserverTrait for RedisCache {
                     );
                 }
             }
-        } else if result == &DataProviderRequestResult::Unauthorized {
+        } else if result == &DataProviderRequestResult::Unauthorized
+            && self.clear_external_datastore_on_unauthorized
+        {
             let connection = self.connection.get().await;
             let redis_key = self.hash_key(key).await;
             match connection {
