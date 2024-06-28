@@ -12,10 +12,6 @@ Our release can be found here: https://hub.docker.com/r/statsig/statsig-forward-
 - If you want to work off bleeding edge, we generate the "[latest](https://hub.docker.com/r/statsig/statsig-forward-proxy/tags?page=&page_size=&ordering=&name=latest)" tag as code lands (give or take 10 minutes). If there's a particular datetime latest you are looking for, we also tag each one with the "[YYMMDDHHmmss](https://hub.docker.com/layers/statsig/statsig-forward-proxy/240404230603-bff2e9385632/images/sha256-0a2a2cc7a338510429ae0b611248be9f3c3371c1e3e046f070b4bbbd5bf62104?context=explore)" prefix.
 - If you want "nightly", we generate daily branch cuts with the tag prefix "DDMMYY", for example, the April 4th nightly build is "[240404-1ffdf554b54b](https://hub.docker.com/layers/statsig/statsig-forward-proxy/240404-1ffdf554b54b/images/sha256-cf50a0584a58395c40e97be2053f78e27e718047243d814708100887fafa08fb?context=explore)". This is a daily branch cut that occurs at midnight.
 
-# Beta Features
-
-We are currently actively developing support for websockets + GRPC/GRPC Streaming. GRPC and GRPC Streaming are available to use, however, are currently considered beta features for the time being.
-
 # Deploying
 
 You could optionally build your own binary, however, we have provided a pre-built amd64/linux build. When starting up the binary, either standalone or through docker. You have various options to configure:
@@ -28,7 +24,7 @@ Arguments:
   <CACHE>  [possible values: local, redis]
 
 Options:
-      --datadog-logging
+      --statsd-logging // or deprecated: --datadog-logging
       --debug-logging
   -m, --maximum-concurrent-sdk-keys <MAXIMUM_CONCURRENT_SDK_KEYS>  [default: 1000]
   -p, --polling-interval-in-s <POLLING_INTERVAL_IN_S>              [default: 10]
@@ -40,9 +36,7 @@ Options:
   -h, --help                                                       Print help
   -V, --version                                                    Print version
 ```
-1. MODE:  This can be configured as grpc or http. Currently we recommend only using the http mode, as
-          there hasn't been large usage of grpc. However, if you wish to to use grpc, please reachout
-          and we'd be happy to support you.
+1. MODE:  This can be configured as grpc or http or grpc-and-http to allow for easy migrations.
 2. CACHE: local uses in process memory to cache backup values, while redis, will use redis. Redis
           will store the config in a single key entry that ends up being "statsig::{sha256(sdk_key)}".
           This allows you read the value back from the SDK data adapter if needed.
@@ -51,8 +45,9 @@ Additional logging parameters we support:
 ```
 --debug-logging: This enables state tracking logging that is emitted for various events within the proxy.
                  It will also emit useful data such as latency for some events.
---datadog-logging: This will emit the same metrics and events as debug logging to datadog metrics instead.
---force_gcp_profiling_enabled: Enable gcp cloud profiler by force
+--statsd-logging: This will emit the same metrics and events using statsd.
+--force_gcp_profiling_enabled: Enable gcp cloud profiler by force.
+--clear-external-datastore-on-unauthorized: When a 401/403 is received, clear external caches (such as redis). Noting that this is a potential reliability trade off.
 ```
 
 # Configuration

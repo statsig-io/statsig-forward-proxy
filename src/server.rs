@@ -11,8 +11,8 @@ use datastore::{
     sdk_key_store,
 };
 use futures::join;
-use loggers::datadog_logger;
 use loggers::debug_logger;
+use loggers::statsd_logger;
 use observers::http_data_provider_observer::HttpDataProviderObserver;
 
 use statsig::{Statsig, StatsigOptions, StatsigUser};
@@ -36,8 +36,11 @@ struct Cli {
     mode: TransportMode,
     #[arg(value_enum)]
     cache: CacheMode,
+    // Deprecated in favour of generic terminology, but kept for backwards compatibility
     #[clap(long, action)]
     datadog_logging: bool,
+    #[clap(long, action)]
+    statsd_logging: bool,
     #[clap(long, action)]
     debug_logging: bool,
     #[clap(short, long, default_value = "1000")]
@@ -231,8 +234,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let overrides = envy::from_env::<ConfigurationAndOverrides>().expect("Envy Error");
     try_initialize_statsig_sdk_and_profiling(&cli, &overrides).await;
 
-    if cli.datadog_logging {
-        let datadog_logger = Arc::new(datadog_logger::DatadogLogger::new().await);
+    if cli.datadog_logging || cli.statsd_logging {
+        let datadog_logger = Arc::new(statsd_logger::StatsdLogger::new().await);
         ProxyEventObserver::add_observer(datadog_logger).await;
     }
     if cli.debug_logging {
