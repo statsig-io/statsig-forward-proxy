@@ -27,6 +27,7 @@ pub struct RedisCache {
     leader_key_ttl: i64,
     check_lcut: bool,
     clear_external_datastore_on_unauthorized: bool,
+    redis_cache_ttl_in_s: i64,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -49,6 +50,7 @@ impl RedisCache {
         uuid: &str,
         check_lcut: bool,
         clear_external_datastore_on_unauthorized: bool,
+        redis_cache_ttl_in_s: i64,
     ) -> Self {
         let config = envy::from_env::<RedisEnvConfig>().expect("Malformed config");
         let protocol = match config.redis_tls.is_some_and(|x| x) {
@@ -83,6 +85,7 @@ impl RedisCache {
             leader_key_ttl,
             check_lcut,
             clear_external_datastore_on_unauthorized,
+            redis_cache_ttl_in_s,
         }
     }
 
@@ -174,6 +177,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                         match pipe
                             .hset(&redis_key, "lcut", lcut)
                             .hset(&redis_key, "config", data.to_string())
+                            .expire(&redis_key, self.redis_cache_ttl_in_s)
                             .expire(REDIS_LEADER_KEY, self.leader_key_ttl)
                             .query_async::<MultiplexedConnection, ()>(&mut *conn)
                             .await

@@ -51,6 +51,8 @@ struct Cli {
     update_batch_size: u64,
     #[clap(short, long, default_value = "70")]
     redis_leader_key_ttl: i64,
+    #[clap(long, default_value = "86400")]
+    redis_cache_ttl_in_s: i64,
     #[clap(long, action)]
     force_gcp_profiling_enabled: bool,
     #[clap(short, long, default_value = "500")]
@@ -148,6 +150,7 @@ async fn create_config_spec_store(
                 cache_uuid,
                 true, /* check lcut */
                 cli.clear_external_datastore_on_unauthorized,
+                cli.redis_cache_ttl_in_s,
             )
             .await,
         ),
@@ -201,6 +204,7 @@ async fn create_id_list_store(
                     cache_uuid,
                     false, /* check lcut */
                     cli.clear_external_datastore_on_unauthorized,
+                    cli.redis_cache_ttl_in_s,
                 )
                 .await,
             )
