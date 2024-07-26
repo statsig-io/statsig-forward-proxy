@@ -2,9 +2,13 @@ use super::data_providers::background_data_provider::{foreground_fetch, Backgrou
 use super::data_providers::DataProviderRequestResult;
 use super::sdk_key_store::SdkKeyStore;
 
-use crate::observers::HttpDataProviderObserverTrait;
+use crate::observers::proxy_event_observer::ProxyEventObserver;
+use crate::observers::{
+    EventStat, HttpDataProviderObserverTrait, OperationType, ProxyEvent, ProxyEventType,
+};
 use std::collections::HashMap;
 
+use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -67,6 +71,18 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                     .await;
                 w_lock.lcut = lcut;
                 w_lock.config = data.clone();
+
+                ProxyEventObserver::publish_event(
+                    ProxyEvent::new(
+                        ProxyEventType::UpdateConfigSpecStorePropagationDelayMs,
+                        sdk_key.to_string(),
+                    )
+                    .with_stat(EventStat {
+                        operation_type: OperationType::Distribution,
+                        value: Utc::now().timestamp_millis() - (lcut as i64),
+                    }),
+                )
+                .await;
             }
         } else if result == &DataProviderRequestResult::Unauthorized && record.is_some() {
             self.store.write().await.remove(sdk_key);

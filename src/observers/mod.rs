@@ -49,6 +49,7 @@ pub enum ProxyEventType {
     GrpcStreamingStreamedResponse,
     GrpcStreamingStreamDisconnected,
     StreamingChannelGotNewData,
+    UpdateConfigSpecStorePropagationDelayMs,
 }
 
 #[derive(Clone, PartialEq, Debug, Copy)]
