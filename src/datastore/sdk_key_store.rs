@@ -4,7 +4,9 @@ use crate::observers::{
     ProxyEventType,
 };
 use crate::observers::{EventStat, OperationType};
+use crate::servers::http_server::AuthorizedRequestContext;
 use async_trait::async_trait;
+
 use std::collections::hash_map::IntoIter;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,60 +20,59 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        sdk_key: &str,
+        request_context: &AuthorizedRequestContext,
         lcut: u64,
         _data: &Arc<String>,
-        path: &str,
     ) {
         if result == &DataProviderRequestResult::DataAvailable {
             let mut write_lock = self.keystore.write().await;
-            if path.eq("/v1/get_id_lists")
-                || (path.eq("/v1/download_config_specs")
-                    && *write_lock.get(sdk_key).unwrap_or(&0) < lcut)
-            {
-                write_lock.insert(sdk_key.to_string(), lcut);
+            if !request_context.use_lcut || *write_lock.get(request_context).unwrap_or(&0) < lcut {
+                write_lock.insert(request_context.clone(), lcut);
             }
         } else if result == &DataProviderRequestResult::Unauthorized {
-            let contains_key = self.keystore.read().await.contains_key(sdk_key);
+            let contains_key = self.keystore.read().await.contains_key(request_context);
             if contains_key {
-                self.keystore.write().await.remove(sdk_key);
+                self.keystore.write().await.remove(request_context);
             }
         }
     }
 
-    async fn get(&self, _key: &str, _path: &str) -> Option<Arc<String>> {
+    async fn get(&self, _request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
         // Not used
         None
     }
 }
 
 pub struct SdkKeyStore {
-    path: String,
-    keystore: Arc<RwLock<HashMap<String, u64>>>,
+    keystore: Arc<RwLock<HashMap<AuthorizedRequestContext, u64>>>,
+}
+
+impl Default for SdkKeyStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SdkKeyStore {
-    pub fn new(path: String) -> SdkKeyStore {
+    pub fn new() -> SdkKeyStore {
         SdkKeyStore {
-            path,
             keystore: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub async fn has_key(&self, key: &str, _since_time: u64) -> bool {
-        match self.keystore.read().await.contains_key(key) {
+    pub async fn has_key(&self, request_context: &AuthorizedRequestContext) -> bool {
+        match self.keystore.read().await.contains_key(request_context) {
             true => {
-                ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheHit, key.to_string())
-                        .with_path(self.path.clone()),
-                )
+                ProxyEventObserver::publish_event(ProxyEvent::new(
+                    ProxyEventType::SdkKeyStoreCacheHit,
+                    request_context,
+                ))
                 .await;
                 true
             }
             false => {
                 ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheMiss, key.to_string())
-                        .with_path(self.path.clone())
+                    ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheMiss, request_context)
                         .with_stat(EventStat {
                             operation_type: OperationType::IncrByValue,
                             value: 1,
@@ -83,7 +84,7 @@ impl SdkKeyStore {
         }
     }
 
-    pub async fn get_registered_store(&self) -> IntoIter<std::string::String, u64> {
+    pub async fn get_registered_store(&self) -> IntoIter<AuthorizedRequestContext, u64> {
         self.keystore.read().await.clone().into_iter()
     }
 }

@@ -6,6 +6,7 @@ use crate::observers::proxy_event_observer::ProxyEventObserver;
 use crate::observers::{
     EventStat, HttpDataProviderObserverTrait, OperationType, ProxyEvent, ProxyEventType,
 };
+use crate::servers::http_server::AuthorizedRequestContext;
 use std::collections::HashMap;
 
 use chrono::Utc;
@@ -19,7 +20,7 @@ pub struct ConfigSpecForCompany {
 }
 
 pub struct ConfigSpecStore {
-    store: Arc<RwLock<HashMap<String, Arc<RwLock<ConfigSpecForCompany>>>>>,
+    store: Arc<RwLock<HashMap<AuthorizedRequestContext, Arc<RwLock<ConfigSpecForCompany>>>>>,
     sdk_key_store: Arc<SdkKeyStore>,
     background_data_provider: Arc<BackgroundDataProvider>,
     no_update_payload: Arc<String>,
@@ -35,18 +36,17 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        sdk_key: &str,
+        request_context: &AuthorizedRequestContext,
         lcut: u64,
         data: &Arc<String>,
-        _path: &str,
     ) {
-        let record = self.store.read().await.get(sdk_key).cloned();
+        let record = self.store.read().await.get(request_context).cloned();
         if (result == &DataProviderRequestResult::Error
             || result == &DataProviderRequestResult::DataAvailable)
             && record.is_none()
         {
             self.store.write().await.insert(
-                sdk_key.to_owned(),
+                request_context.clone(),
                 Arc::new(RwLock::new(ConfigSpecForCompany {
                     lcut,
                     config: data.clone(),
@@ -65,7 +65,7 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
             } else {
                 let hm_r_lock = self.store.read().await;
                 let mut w_lock = hm_r_lock
-                    .get(sdk_key)
+                    .get(request_context)
                     .expect("Record must exist")
                     .write()
                     .await;
@@ -75,8 +75,9 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new(
                         ProxyEventType::UpdateConfigSpecStorePropagationDelayMs,
-                        sdk_key.to_string(),
+                        request_context,
                     )
+                    .with_lcut(lcut)
                     .with_stat(EventStat {
                         operation_type: OperationType::Distribution,
                         value: Utc::now().timestamp_millis() - (lcut as i64),
@@ -85,12 +86,12 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                 .await;
             }
         } else if result == &DataProviderRequestResult::Unauthorized && record.is_some() {
-            self.store.write().await.remove(sdk_key);
+            self.store.write().await.remove(request_context);
         }
     }
 
-    async fn get(&self, key: &str, _path: &str) -> Option<Arc<String>> {
-        match self.store.read().await.get(key) {
+    async fn get(&self, request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
+        match self.store.read().await.get(request_context) {
             Some(record) => Some(record.read().await.config.clone()),
             None => None,
         }
@@ -112,15 +113,15 @@ impl ConfigSpecStore {
 
     pub async fn get_config_spec(
         &self,
-        sdk_key: &str,
+        request_context: &AuthorizedRequestContext,
         since_time: u64,
     ) -> Option<Arc<RwLock<ConfigSpecForCompany>>> {
-        if !self.sdk_key_store.has_key(sdk_key, since_time).await {
+        if !self.sdk_key_store.has_key(request_context).await {
             // Since it's a cache-miss, just fill with a full payload
             // and check if we should return no update manually
             foreground_fetch(
                 self.background_data_provider.clone(),
-                sdk_key,
+                request_context,
                 0,
                 self.sdk_key_store.clone(),
             )
@@ -134,7 +135,7 @@ impl ConfigSpecStore {
         // If the payload for sinceTime 0 is greater than since_time
         // then return the full payload.
         let read_lock = self.store.read().await;
-        let record = read_lock.get(sdk_key);
+        let record = read_lock.get(request_context);
         match record {
             Some(record) => {
                 if record.read().await.lcut > since_time {

@@ -2,9 +2,11 @@ use clap::Parser;
 use clap::ValueEnum;
 
 use datastore::config_spec_store::ConfigSpecStore;
+use datastore::data_providers::request_builder::CachedRequestBuilders;
 use datastore::data_providers::request_builder::DcsRequestBuilder;
 use datastore::data_providers::request_builder::IdlistRequestBuilder;
 use datastore::get_id_list_store::GetIdListStore;
+use datastore::log_event_store::LogEventStore;
 use datastore::{
     caching::{in_memory_cache, redis_cache},
     data_providers::{background_data_provider, http_data_provider},
@@ -24,6 +26,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub mod datastore;
+pub mod datatypes;
 pub mod loggers;
 pub mod observers;
 pub mod servers;
@@ -70,6 +73,8 @@ struct ConfigurationAndOverrides {
     statsig_endpoint: Option<String>,
     statsig_server_sdk_key: Option<String>,
     hostname: Option<String>,
+    log_event_statsig_endpoint: Option<String>,
+    log_event_dedupe_cache_limit: Option<usize>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -138,6 +143,7 @@ async fn create_config_spec_store(
     background_data_provider: Arc<background_data_provider::BackgroundDataProvider>,
     config_spec_observer: Arc<HttpDataProviderObserver>,
     cache_uuid: &str,
+    sdk_key_store: &Arc<sdk_key_store::SdkKeyStore>,
 ) -> Arc<ConfigSpecStore> {
     let shared_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
         CacheMode::Local => Arc::new(in_memory_cache::InMemoryCache::new(
@@ -155,9 +161,6 @@ async fn create_config_spec_store(
             .await,
         ),
     };
-    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new(
-        "/v1/download_config_specs".to_string(),
-    ));
     let dcs_request_builder = Arc::new(DcsRequestBuilder::new(
         overrides
             .statsig_endpoint
@@ -165,10 +168,13 @@ async fn create_config_spec_store(
             .map_or("https://api.statsigcdn.com".to_string(), |s| s.to_string()),
         Arc::clone(&config_spec_observer),
         Arc::clone(&shared_cache),
-        Arc::clone(&sdk_key_store),
     ));
-    background_data_provider
-        .add_request_builder(dcs_request_builder)
+    CachedRequestBuilders::add_request_builder(
+        "/v1/download_config_specs/",
+        dcs_request_builder.clone(),
+    )
+    .await;
+    CachedRequestBuilders::add_request_builder("/v2/download_config_specs/", dcs_request_builder)
         .await;
     let config_spec_store = Arc::new(datastore::config_spec_store::ConfigSpecStore::new(
         sdk_key_store.clone(),
@@ -191,6 +197,7 @@ async fn create_id_list_store(
     background_data_provider: Arc<background_data_provider::BackgroundDataProvider>,
     idlist_observer: Arc<HttpDataProviderObserver>,
     cache_uuid: &str,
+    sdk_key_store: &Arc<sdk_key_store::SdkKeyStore>,
 ) -> Arc<GetIdListStore> {
     let shared_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
         CacheMode::Local => Arc::new(in_memory_cache::InMemoryCache::new(
@@ -210,17 +217,11 @@ async fn create_id_list_store(
             )
         }
     };
-    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new(
-        "/v1/get_id_lists".to_string(),
-    ));
     let idlist_request_builder = Arc::new(IdlistRequestBuilder::new(
         Arc::clone(&idlist_observer),
         Arc::clone(&shared_cache),
-        Arc::clone(&sdk_key_store),
     ));
-    background_data_provider
-        .add_request_builder(idlist_request_builder)
-        .await;
+    CachedRequestBuilders::add_request_builder("/v1/get_id_lists/", idlist_request_builder).await;
     let id_list_store = Arc::new(datastore::get_id_list_store::GetIdListStore::new(
         sdk_key_store.clone(),
         background_data_provider.clone(),
@@ -230,6 +231,20 @@ async fn create_id_list_store(
     idlist_observer.add_observer(shared_cache).await;
 
     id_list_store
+}
+
+async fn create_log_event_store(
+    http_client: reqwest::Client,
+    config: &ConfigurationAndOverrides,
+) -> Arc<LogEventStore> {
+    Arc::new(LogEventStore::new(
+        config
+            .log_event_statsig_endpoint
+            .as_ref()
+            .map_or("https://statsigapi.net", |s| s.as_str()),
+        http_client,
+        config.log_event_dedupe_cache_limit.unwrap_or(2_000_000),
+    ))
 }
 
 #[rocket::main]
@@ -246,12 +261,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let debug_logger = Arc::new(debug_logger::DebugLogger::new());
         ProxyEventObserver::add_observer(debug_logger).await;
     }
-
-    let shared_http_data_provider = Arc::new(http_data_provider::HttpDataProvider::new());
+    let http_client = reqwest::Client::builder()
+        .gzip(true)
+        .pool_idle_timeout(None)
+        .build()
+        .expect("We must have an http client");
+    let shared_http_data_provider = Arc::new(http_data_provider::HttpDataProvider::new(
+        http_client.clone(),
+    ));
+    let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
     let background_data_provider = Arc::new(background_data_provider::BackgroundDataProvider::new(
         shared_http_data_provider,
         cli.polling_interval_in_s,
         cli.update_batch_size,
+        Arc::clone(&sdk_key_store),
     ));
     let cache_uuid = Uuid::new_v4().to_string();
     let config_spec_observer = Arc::new(HttpDataProviderObserver::new());
@@ -261,6 +284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&background_data_provider),
         Arc::clone(&config_spec_observer),
         &cache_uuid,
+        &sdk_key_store,
     )
     .await;
     let idlist_observer = Arc::new(HttpDataProviderObserver::new());
@@ -270,8 +294,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&background_data_provider),
         Arc::clone(&idlist_observer),
         &cache_uuid,
+        &sdk_key_store,
     )
     .await;
+    let log_event_store = create_log_event_store(http_client.clone(), &overrides).await;
     background_data_provider.start_background_thread().await;
 
     match cli.mode {
@@ -284,7 +310,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?
         }
         TransportMode::Http => {
-            servers::http_server::HttpServer::start_server(config_spec_store, id_list_store).await?
+            servers::http_server::HttpServer::start_server(
+                config_spec_store,
+                id_list_store,
+                log_event_store,
+            )
+            .await?
         }
         TransportMode::GrpcAndHttp => {
             let grpc_server = servers::grpc_server::GrpcServer::start_server(
@@ -292,8 +323,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config_spec_store.clone(),
                 config_spec_observer.clone(),
             );
-            let http_server =
-                servers::http_server::HttpServer::start_server(config_spec_store, id_list_store);
+            let http_server = servers::http_server::HttpServer::start_server(
+                config_spec_store,
+                id_list_store,
+                log_event_store,
+            );
             join!(async { grpc_server.await.ok() }, async {
                 http_server.await.ok()
             },);

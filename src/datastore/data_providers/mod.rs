@@ -5,13 +5,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::servers::http_server::AuthorizedRequestContext;
+
 use self::request_builder::RequestBuilderTrait;
 #[async_trait]
 pub trait DataProviderTrait {
     async fn get(
         &self,
         request_builder: &Arc<dyn RequestBuilderTrait>,
-        key: &str,
+        request_context: &AuthorizedRequestContext,
         lcut: u64,
     ) -> DataProviderResult;
 }

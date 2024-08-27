@@ -6,6 +6,13 @@ pub mod statsig_forward_proxy {
     tonic::include_proto!("statsig_forward_proxy");
 }
 
+fn last_500_char(spec: &String) -> String {
+    // only print last 500 characters
+    let len = spec.len();
+    let start = if len > 500 { len - 500 } else { 0 };
+    spec[start..].to_string()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = StatsigForwardProxyClient::connect("http://0.0.0.0:50051")
@@ -14,21 +21,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_decoding_message_size(16777216);
 
     // Non-Streaming
-    let request = tonic::Request::new(ConfigSpecRequest {
-        since_time: Some(1234),
-        sdk_key: "1234".into(),
-    });
-    let response: tonic::Response<statsig_forward_proxy::ConfigSpecResponse> =
-        client.get_config_spec(request).await?;
-    println!(
-        "RESPONSE={:?}, CURRENT TIME={}",
-        response.into_inner().last_updated,
-        Local::now()
-    );
+    for version in 0..3 {
+        let request = tonic::Request::new(ConfigSpecRequest {
+            since_time: Some(1234),
+            sdk_key: "1234".into(),
+            version: Some(version),
+        });
+        let response: tonic::Response<statsig_forward_proxy::ConfigSpecResponse> =
+            client.get_config_spec(request).await?;
+        let config_response = response.into_inner();
+        println!(
+            "Version={}, RESPONSE={:?}, CURRENT TIME={}, SPEC={}\n",
+            version,
+            &config_response.last_updated,
+            Local::now(),
+            last_500_char(&config_response.spec)
+        );
+    }
+
     // Streaming
     let request = tonic::Request::new(ConfigSpecRequest {
         since_time: Some(1234),
         sdk_key: "1234".into(),
+        version: Some(2),
     });
     let response = client.stream_config_spec(request).await?;
     println!("Metadata={:?}", response.metadata());
@@ -38,9 +53,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match stream.message().await {
             Ok(Some(value)) => {
                 println!(
-                    "STREAMING={:?}, CURRENT TIME={}",
+                    "STREAMING={:?}, CURRENT TIME={}, SPEC={}",
                     value.last_updated,
-                    Local::now()
+                    Local::now(),
+                    last_500_char(&value.spec)
                 );
             }
             Ok(None) => {

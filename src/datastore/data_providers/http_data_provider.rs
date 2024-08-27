@@ -5,8 +5,9 @@ use super::{DataProviderRequestResult, DataProviderResult, DataProviderTrait};
 use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{proxy_event_observer::ProxyEventObserver, ProxyEvent, ProxyEventType};
+use crate::servers::http_server::AuthorizedRequestContext;
 use reqwest::header::HeaderMap;
-use reqwest::Client;
+
 pub trait DataProviderObserver {
     fn update(&self, key: &str, data: &str);
 }
@@ -15,21 +16,9 @@ pub struct HttpDataProvider {
     http_client: reqwest::Client,
 }
 
-impl Default for HttpDataProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl HttpDataProvider {
-    pub fn new() -> Self {
-        HttpDataProvider {
-            http_client: Client::builder()
-                .gzip(true)
-                .pool_idle_timeout(None)
-                .build()
-                .expect("We must have an http client"),
-        }
+    pub fn new(http_client: reqwest::Client) -> Self {
+        HttpDataProvider { http_client }
     }
 }
 
@@ -41,7 +30,7 @@ impl DataProviderTrait for HttpDataProvider {
     async fn get(
         &self,
         request_builder: &Arc<dyn RequestBuilderTrait>,
-        key: &str,
+        request_context: &AuthorizedRequestContext,
         lcut: u64,
     ) -> DataProviderResult {
         let start_time = Instant::now();
@@ -50,7 +39,7 @@ impl DataProviderTrait for HttpDataProvider {
         let mut headers: HeaderMap = HeaderMap::new();
         let mut is_unauthorized = false;
         match request_builder
-            .make_request(&self.http_client, key, lcut)
+            .make_request(&self.http_client, request_context, lcut)
             .await
         {
             Ok(response) => {
@@ -85,10 +74,12 @@ impl DataProviderTrait for HttpDataProvider {
                 Err(_err) => -2,
             };
         if err_msg.is_empty() {
-            if !request_builder.is_an_update(&body, key).await {
+            if !request_builder
+                .is_an_update(&body, &request_context.sdk_key)
+                .await
+            {
                 ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::HttpDataProviderNoData, key.to_string())
-                        .with_path(request_builder.get_path())
+                    ProxyEvent::new(ProxyEventType::HttpDataProviderNoData, request_context)
                         .with_lcut(lcut)
                         .with_stat(EventStat {
                             operation_type: OperationType::Distribution,
@@ -114,9 +105,8 @@ impl DataProviderTrait for HttpDataProvider {
                             ProxyEventObserver::publish_event(
                                 ProxyEvent::new(
                                     ProxyEventType::HttpDataProviderNoDataDueToBadLcut,
-                                    key.to_string(),
+                                    request_context,
                                 )
-                                .with_path(request_builder.get_path())
                                 .with_lcut(lcut)
                                 .with_stat(EventStat {
                                     operation_type: OperationType::Distribution,
@@ -134,8 +124,7 @@ impl DataProviderTrait for HttpDataProvider {
                 };
 
                 ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::HttpDataProviderGotData, key.to_string())
-                        .with_path(request_builder.get_path())
+                    ProxyEvent::new(ProxyEventType::HttpDataProviderGotData, request_context)
                         .with_lcut(since_time)
                         .with_stat(EventStat {
                             operation_type: OperationType::Distribution,
@@ -151,8 +140,7 @@ impl DataProviderTrait for HttpDataProvider {
         } else {
             eprintln!("Failed to get data from http provider: {:?}", err_msg);
             ProxyEventObserver::publish_event(
-                ProxyEvent::new(ProxyEventType::HttpDataProviderError, key.to_string())
-                    .with_path(request_builder.get_path())
+                ProxyEvent::new(ProxyEventType::HttpDataProviderError, request_context)
                     .with_lcut(lcut)
                     .with_stat(EventStat {
                         operation_type: OperationType::Distribution,

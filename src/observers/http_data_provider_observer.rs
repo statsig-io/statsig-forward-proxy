@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use tokio::{sync::RwLock, task};
 
-use crate::datastore::data_providers::DataProviderRequestResult;
+use crate::{
+    datastore::data_providers::DataProviderRequestResult,
+    servers::http_server::AuthorizedRequestContext,
+};
 
 use super::HttpDataProviderObserverTrait;
 
@@ -33,21 +36,19 @@ impl HttpDataProviderObserver {
     pub async fn notify_all(
         &self,
         result: &DataProviderRequestResult,
-        sdk_key: &str,
+        request_context: &AuthorizedRequestContext,
         lcut: u64,
         data: &Arc<String>,
-        path: &str,
     ) {
         let result_copy = *result;
-        let sdk_key_copy = sdk_key.to_string();
+        let rc_clone = request_context.clone();
         let data_copy = Arc::clone(data);
         let shared_observer = self.observers.clone();
-        let path_copy = path.to_string();
         task::spawn(async move {
             for observer in shared_observer.read().await.iter() {
                 if !observer.force_notifier_to_wait_for_update() {
                     observer
-                        .update(&result_copy, &sdk_key_copy, lcut, &data_copy, &path_copy)
+                        .update(&result_copy, &rc_clone, lcut, &data_copy)
                         .await;
                 }
             }
@@ -55,7 +56,7 @@ impl HttpDataProviderObserver {
 
         for observer in self.observers.read().await.iter() {
             if observer.force_notifier_to_wait_for_update() {
-                observer.update(result, sdk_key, lcut, data, path).await;
+                observer.update(result, request_context, lcut, data).await;
             }
         }
     }
