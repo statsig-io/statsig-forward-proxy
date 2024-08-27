@@ -23,6 +23,8 @@ use tonic::metadata::MetadataValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::http_server::AuthorizedRequestContext;
+
 pub mod statsig_forward_proxy {
     tonic::include_proto!("statsig_forward_proxy");
 }
@@ -30,20 +32,32 @@ pub mod statsig_forward_proxy {
 pub struct StatsigForwardProxyServerImpl {
     config_spec_store: Arc<datastore::config_spec_store::ConfigSpecStore>,
     dcs_observer: Arc<HttpDataProviderObserver>,
-    update_broadcast_cache: Arc<RwLock<HashMap<String, Arc<StreamingChannel>>>>,
+    update_broadcast_cache: Arc<RwLock<HashMap<AuthorizedRequestContext, Arc<StreamingChannel>>>>,
 }
 
 impl StatsigForwardProxyServerImpl {
     fn new(
         config_spec_store: Arc<ConfigSpecStore>,
         dcs_observer: Arc<HttpDataProviderObserver>,
-        update_broadcast_cache: Arc<RwLock<HashMap<String, Arc<StreamingChannel>>>>,
+        update_broadcast_cache: Arc<
+            RwLock<HashMap<AuthorizedRequestContext, Arc<StreamingChannel>>>,
+        >,
     ) -> Self {
         StatsigForwardProxyServerImpl {
             config_spec_store,
             dcs_observer,
             update_broadcast_cache,
         }
+    }
+
+    fn get_api_version_from_request(request: &Request<ConfigSpecRequest>) -> i32 {
+        let mut version_number = request.get_ref().version.unwrap_or(1);
+        // Set default version for backwards compatability to v1 if not defined
+        if version_number == 0 {
+            version_number = 1;
+        }
+
+        version_number
     }
 }
 
@@ -56,7 +70,13 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         let data = match self
             .config_spec_store
             .get_config_spec(
-                &request.get_ref().sdk_key,
+                &AuthorizedRequestContext::new(
+                    request.get_ref().sdk_key.clone(),
+                    format!(
+                        "/v{}/download_config_specs/",
+                        StatsigForwardProxyServerImpl::get_api_version_from_request(&request)
+                    ),
+                ),
                 request.get_ref().since_time.unwrap_or(0),
             )
             .await
@@ -78,9 +98,14 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         &self,
         request: Request<ConfigSpecRequest>,
     ) -> Result<tonic::Response<Self::StreamConfigSpecStream>, tonic::Status> {
-        let (tx, rx) = mpsc::channel(1);
         let sdk_key = request.get_ref().sdk_key.to_string();
+        let api_version = StatsigForwardProxyServerImpl::get_api_version_from_request(&request);
+        let request_context = AuthorizedRequestContext::new(
+            sdk_key.clone(),
+            format!("/v{}/download_config_specs/", api_version),
+        );
 
+        let (tx, rx) = mpsc::channel(1);
         // Get initial DCS on first request
         // If this fails, we just return error instead
         // of initializing stream which also deals with
@@ -95,23 +120,23 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         // Re-use broadcast channel if its already been created for
         // a given sdk key
         let mut wlock = self.update_broadcast_cache.write().await;
-        let mut rc = match wlock.contains_key(&sdk_key) {
+        let mut rc = match wlock.contains_key(&request_context) {
             true => wlock
-                .get(&sdk_key)
+                .get(&request_context)
                 .expect("We did a key check")
                 .sender
                 .read()
                 .await
                 .subscribe(),
             false => {
-                let sc = Arc::new(StreamingChannel::new(&sdk_key));
+                let sc = Arc::new(StreamingChannel::new(&request_context));
                 let streaming_channel_trait: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> =
                     sc.clone();
                 self.dcs_observer
                     .add_observer(streaming_channel_trait)
                     .await;
                 let rv = sc.sender.read().await.subscribe();
-                wlock.insert(sdk_key.to_string(), sc);
+                wlock.insert(request_context.clone(), sc);
                 rv
             }
         };
@@ -124,7 +149,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             ProxyEventObserver::publish_event(
                 ProxyEvent::new(
                     ProxyEventType::GrpcStreamingStreamedInitialized,
-                    sdk_key.to_string(),
+                    &request_context,
                 )
                 .with_stat(EventStat {
                     operation_type: OperationType::IncrByValue,
@@ -141,7 +166,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                                 ProxyEventObserver::publish_event(
                                     ProxyEvent::new(
                                         ProxyEventType::GrpcStreamingStreamedResponse,
-                                        sdk_key.to_string(),
+                                        &request_context,
                                     )
                                     .with_stat(EventStat {
                                         operation_type: OperationType::IncrByValue,
@@ -163,7 +188,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                         rc = ubc_ref
                             .read()
                             .await
-                            .get(&sdk_key)
+                            .get(&request_context)
                             .expect("Already created")
                             .sender
                             .read()
@@ -176,7 +201,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             ProxyEventObserver::publish_event(
                 ProxyEvent::new(
                     ProxyEventType::GrpcStreamingStreamDisconnected,
-                    sdk_key.to_string(),
+                    &request_context,
                 )
                 .with_stat(EventStat {
                     operation_type: OperationType::IncrByValue,
@@ -200,7 +225,9 @@ pub struct GrpcServer {}
 
 impl GrpcServer {
     async fn shutdown_signal(
-        update_broadcast_cache: Arc<RwLock<HashMap<String, Arc<StreamingChannel>>>>,
+        update_broadcast_cache: Arc<
+            RwLock<HashMap<AuthorizedRequestContext, Arc<StreamingChannel>>>,
+        >,
     ) {
         let mut int_stream =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -215,7 +242,7 @@ impl GrpcServer {
             _ = term_stream.recv() => {
                 println!("Received SIGTERM, terminating...");
             }
-        };
+        }
 
         let wlock = update_broadcast_cache.write().await;
 

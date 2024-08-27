@@ -6,6 +6,7 @@ use crate::{
         proxy_event_observer::ProxyEventObserver, EventStat, HttpDataProviderObserverTrait,
         OperationType, ProxyEvent, ProxyEventType,
     },
+    servers::http_server::AuthorizedRequestContext,
 };
 
 use lru::LruCache;
@@ -24,10 +25,6 @@ impl InMemoryCache {
             ))),
         }
     }
-
-    fn get_storage_key(key: &str, path: &str) -> String {
-        format!("{}|{}", path, key)
-    }
 }
 
 use async_trait::async_trait;
@@ -40,12 +37,11 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        key: &str,
+        request_context: &AuthorizedRequestContext,
         lcut: u64,
         data: &Arc<String>,
-        path: &str,
     ) {
-        let storage_key = InMemoryCache::get_storage_key(key, path);
+        let storage_key = request_context.to_string();
         if result == &DataProviderRequestResult::DataAvailable {
             if let Some(record) = self.data.read().await.peek(&storage_key) {
                 self.data.write().await.put(
@@ -58,7 +54,7 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
 
                 if lcut > record.lcut {
                     ProxyEventObserver::publish_event(
-                        ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSucceed, key.to_string())
+                        ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSucceed, request_context)
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -67,7 +63,7 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
                     .await;
                 } else {
                     ProxyEventObserver::publish_event(
-                        ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSkipped, key.to_string())
+                        ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSkipped, request_context)
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -77,7 +73,7 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
                 }
             } else {
                 ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSucceed, key.to_string())
+                    ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSucceed, request_context)
                         .with_stat(EventStat {
                             operation_type: OperationType::IncrByValue,
                             value: 1,
@@ -93,21 +89,21 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
         }
     }
 
-    async fn get(&self, key: &str, path: &str) -> Option<Arc<String>> {
+    async fn get(&self, request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
         ProxyEventObserver::publish_event(
-            ProxyEvent::new(ProxyEventType::InMemoryCacheReadSucceed, key.to_string())
-                .with_path(path.to_string())
-                .with_stat(EventStat {
+            ProxyEvent::new(ProxyEventType::InMemoryCacheReadSucceed, request_context).with_stat(
+                EventStat {
                     operation_type: OperationType::IncrByValue,
                     value: 1,
-                }),
+                },
+            ),
         )
         .await;
 
         self.data
             .read()
             .await
-            .peek(&InMemoryCache::get_storage_key(key, path))
+            .peek(&request_context.to_string())
             .map(|record| record.config.clone())
     }
 }

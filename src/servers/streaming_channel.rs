@@ -7,22 +7,23 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
 
 use super::grpc_server::statsig_forward_proxy::ConfigSpecResponse;
+use super::http_server::AuthorizedRequestContext;
 use crate::observers::proxy_event_observer::ProxyEventObserver;
 use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{ProxyEvent, ProxyEventType};
 
 pub struct StreamingChannel {
-    key: String,
+    request_context: AuthorizedRequestContext,
     last_updated: Arc<RwLock<u64>>,
     pub sender: Arc<RwLock<Sender<Option<ConfigSpecResponse>>>>,
 }
 
 impl StreamingChannel {
-    pub fn new(key: &str) -> Self {
+    pub fn new(request_context: &AuthorizedRequestContext) -> Self {
         let (tx, _rx) = broadcast::channel(1);
         StreamingChannel {
-            key: key.to_string(),
+            request_context: request_context.clone(),
             last_updated: Arc::new(RwLock::new(0)),
             sender: Arc::new(RwLock::new(tx)),
         }
@@ -38,17 +39,18 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        key: &str,
+        request_context: &AuthorizedRequestContext,
         lcut: u64,
         data: &Arc<String>,
-        path: &str,
     ) {
         let mut wlock = self.last_updated.write().await;
         let is_newer_lcut = lcut > *wlock;
-        if is_newer_lcut && self.key == key && result == &DataProviderRequestResult::DataAvailable {
+        if is_newer_lcut
+            && self.request_context == *request_context
+            && result == &DataProviderRequestResult::DataAvailable
+        {
             ProxyEventObserver::publish_event(
-                ProxyEvent::new(ProxyEventType::StreamingChannelGotNewData, key.to_string())
-                    .with_path(path.to_string())
+                ProxyEvent::new(ProxyEventType::StreamingChannelGotNewData, request_context)
                     .with_stat(EventStat {
                         operation_type: OperationType::IncrByValue,
                         value: 1,
@@ -74,7 +76,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
         }
     }
 
-    async fn get(&self, _key: &str, _path: &str) -> Option<Arc<String>> {
+    async fn get(&self, _request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
         unimplemented!("Not Used")
     }
 }

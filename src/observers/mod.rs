@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::datastore::data_providers::DataProviderRequestResult;
+use crate::{
+    datastore::data_providers::DataProviderRequestResult,
+    servers::http_server::AuthorizedRequestContext,
+};
 
 #[async_trait]
 pub trait HttpDataProviderObserverTrait {
@@ -14,12 +17,11 @@ pub trait HttpDataProviderObserverTrait {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        sdk_key: &str,
+        request_context: &AuthorizedRequestContext,
         lcut: u64,
         data: &Arc<String>,
-        path: &str,
     );
-    async fn get(&self, key: &str, path: &str) -> Option<Arc<String>>;
+    async fn get(&self, request_context: &AuthorizedRequestContext) -> Option<Arc<String>>;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -70,25 +72,25 @@ pub struct EventStat {
 pub struct ProxyEvent {
     pub event_type: ProxyEventType,
     pub sdk_key: String,
-    pub path: Option<String>,
+    pub path: String,
     pub lcut: Option<u64>,
     pub stat: Option<EventStat>,
+    pub status_code: Option<u16>,
 }
 
 impl ProxyEvent {
-    pub fn new(event_type: ProxyEventType, sdk_key: String) -> ProxyEvent {
+    pub fn new(
+        event_type: ProxyEventType,
+        request_context: &AuthorizedRequestContext,
+    ) -> ProxyEvent {
         ProxyEvent {
             event_type,
-            sdk_key,
-            path: None,
+            sdk_key: request_context.sdk_key.clone(),
+            path: request_context.path.clone(),
             lcut: None,
             stat: None,
+            status_code: None
         }
-    }
-
-    pub fn with_path(mut self, path: String) -> Self {
-        self.path = Some(path);
-        self
     }
 
     pub fn with_lcut(mut self, lcut: u64) -> Self {
@@ -98,6 +100,11 @@ impl ProxyEvent {
 
     pub fn with_stat(mut self, stat: EventStat) -> Self {
         self.stat = Some(stat);
+        self
+    }
+
+    pub fn with_status_code(mut self,code: u16) -> Self {
+        self.status_code = Some(code);
         self
     }
 }
