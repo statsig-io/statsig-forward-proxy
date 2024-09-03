@@ -39,7 +39,7 @@ struct Cli {
     mode: TransportMode,
     #[arg(value_enum)]
     cache: CacheMode,
-    // Deprecated in favour of generic terminology, but kept for backwards compatibility
+    // Same as statsd logging except uses distribution metrics
     #[clap(long, action)]
     datadog_logging: bool,
     #[clap(long, action)]
@@ -254,7 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     try_initialize_statsig_sdk_and_profiling(&cli, &overrides).await;
 
     if cli.datadog_logging || cli.statsd_logging {
-        let datadog_logger = Arc::new(statsd_logger::StatsdLogger::new().await);
+        let datadog_logger = Arc::new(statsd_logger::StatsdLogger::new(cli.datadog_logging).await);
         ProxyEventObserver::add_observer(datadog_logger).await;
     }
     if cli.debug_logging {

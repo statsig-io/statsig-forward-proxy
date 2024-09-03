@@ -56,9 +56,8 @@ pub enum ProxyEventType {
 
 #[derive(Clone, PartialEq, Debug, Copy)]
 pub enum OperationType {
-    #[allow(dead_code)]
     Distribution,
-    #[allow(dead_code)]
+    Timing,
     Gauge,
     IncrByValue,
 }
@@ -89,7 +88,7 @@ impl ProxyEvent {
             path: request_context.path.clone(),
             lcut: None,
             stat: None,
-            status_code: None
+            status_code: None,
         }
     }
 
@@ -103,7 +102,7 @@ impl ProxyEvent {
         self
     }
 
-    pub fn with_status_code(mut self,code: u16) -> Self {
+    pub fn with_status_code(mut self, code: u16) -> Self {
         self.status_code = Some(code);
         self
     }

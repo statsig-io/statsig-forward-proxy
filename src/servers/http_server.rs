@@ -12,6 +12,7 @@ use crate::observers::{ProxyEvent, ProxyEventType};
 use crate::servers::http_apis;
 use rocket::fairing::AdHoc;
 
+use rocket::http::StatusClass;
 use rocket::http::{Header, Status};
 use rocket::post;
 use rocket::request::Outcome;
@@ -236,7 +237,7 @@ impl HttpServer {
                             .to_string(),
                         req.uri().path().to_string(),
                     );
-                    if resp.status() == Status::Ok {
+                    if resp.status().class() == StatusClass::Success {
                         ProxyEventObserver::publish_event(
                             ProxyEvent::new(
                                 ProxyEventType::HttpServerRequestSuccess,
@@ -257,7 +258,8 @@ impl HttpServer {
                             .with_stat(EventStat {
                                 operation_type: OperationType::Distribution,
                                 value: ms,
-                            }).with_status_code(resp.status().code)
+                            })
+                            .with_status_code(resp.status().code),
                         )
                         .await;
                     }

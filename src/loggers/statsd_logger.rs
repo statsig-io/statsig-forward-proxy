@@ -52,6 +52,7 @@ struct Operation {
 
 pub struct StatsdLogger {
     sender: Sender<Operation>,
+    use_distribution_instead_of_timing: bool,
 }
 
 fn get_hostname() -> String {
@@ -62,7 +63,7 @@ fn get_hostname() -> String {
 }
 
 impl StatsdLogger {
-    pub async fn new() -> Self {
+    pub async fn new(use_distribution_instead_of_timing: bool) -> Self {
         let config = envy::from_env::<EnvConfig>().expect("Malformed config");
         let (tx, rx): (Sender<Operation>, Receiver<Operation>) = mpsc::channel(
             usize::try_from(config.datadog_sender_buffer_size.unwrap_or(50000)).unwrap(),
@@ -71,7 +72,10 @@ impl StatsdLogger {
             batching::process_operations(rx).await;
         });
 
-        StatsdLogger { sender: tx }
+        StatsdLogger {
+            sender: tx,
+            use_distribution_instead_of_timing,
+        }
     }
 }
 
@@ -90,12 +94,24 @@ impl ProxyEventObserverTrait for StatsdLogger {
                 tags.push(format!("status_code:{}", code));
             }
             let suffix = match stat.operation_type {
+                OperationType::Timing => "latency",
                 OperationType::Distribution => "latency",
                 OperationType::Gauge => "gauge",
                 OperationType::IncrByValue => "count",
             };
             let res = self.sender.try_send(Operation {
-                operation_type: stat.operation_type,
+                // Normalize operation type depending on whether we think we support
+                // distribution (datadog) or timing (statsd)
+                operation_type: match stat.operation_type {
+                    OperationType::Timing | OperationType::Distribution => {
+                        if self.use_distribution_instead_of_timing {
+                            OperationType::Distribution
+                        } else {
+                            OperationType::Timing
+                        }
+                    }
+                    other => other,
+                },
                 counter_name: format!("statsig.forward_proxy.{:?}.{}", event.event_type, suffix),
                 value: Some(stat.value.to_string()),
                 tags,
@@ -118,7 +134,7 @@ mod batching {
     use super::*;
 
     lazy_static! {
-        static ref DATADOG_CLIENT: Arc<Client> = Arc::new(
+        static ref STATSD_CLIENT: Arc<Client> = Arc::new(
             Client::new(initialize_datadog_client_options())
                 .expect("Need datadog client if enabled")
         );
@@ -177,6 +193,9 @@ mod batching {
 
         for event in batch {
             match event.operation_type {
+                OperationType::Timing => {
+                    compressed_batch.push(event);
+                }
                 OperationType::Distribution => {
                     compressed_batch.push(event);
                 }
@@ -207,8 +226,19 @@ mod batching {
 
     fn send(event: Operation) -> bool {
         match event.operation_type {
+            OperationType::Timing => {
+                let timing = i64::from_str(event.value.unwrap().as_str()).unwrap();
+
+                match STATSD_CLIENT.timing(event.counter_name, timing, event.tags) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        eprintln!("Failed to update timing for counter: {}", err);
+                        false
+                    }
+                }
+            }
             OperationType::Distribution => {
-                match DATADOG_CLIENT.distribution(
+                match STATSD_CLIENT.distribution(
                     event.counter_name,
                     event.value.unwrap(),
                     event.tags,
@@ -221,7 +251,7 @@ mod batching {
                 }
             }
             OperationType::Gauge => {
-                match DATADOG_CLIENT.gauge(event.counter_name, event.value.unwrap(), event.tags) {
+                match STATSD_CLIENT.gauge(event.counter_name, event.value.unwrap(), event.tags) {
                     Ok(()) => true,
                     Err(err) => {
                         eprintln!("Failed to gauge for counter: {}", err);
@@ -232,7 +262,7 @@ mod batching {
             OperationType::IncrByValue => {
                 let incr_amount = i64::from_str(event.value.unwrap().as_str()).unwrap();
 
-                match DATADOG_CLIENT.incr_by_value(event.counter_name, incr_amount, event.tags) {
+                match STATSD_CLIENT.incr_by_value(event.counter_name, incr_amount, event.tags) {
                     Ok(()) => true,
                     Err(err) => {
                         eprintln!("Failed to increment counter: {}", err);
