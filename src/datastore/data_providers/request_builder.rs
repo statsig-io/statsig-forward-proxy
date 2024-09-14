@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, time::Instant};
@@ -53,7 +54,7 @@ pub trait RequestBuilderTrait: Send + Sync + 'static {
     async fn is_an_update(&self, body: &str, sdk_key: &str) -> bool;
     fn get_observers(&self) -> Arc<HttpDataProviderObserver>;
     fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send>;
-    async fn should_make_request(&self) -> bool;
+    async fn should_make_request(&self, rc: &AuthorizedRequestContext) -> bool;
 }
 
 pub struct NoopRequestBuilder {}
@@ -81,7 +82,7 @@ impl RequestBuilderTrait for NoopRequestBuilder {
         unimplemented!()
     }
 
-    async fn should_make_request(&self) -> bool {
+    async fn should_make_request(&self, _rc: &AuthorizedRequestContext) -> bool {
         false
     }
 }
@@ -141,7 +142,7 @@ impl RequestBuilderTrait for DcsRequestBuilder {
         Arc::clone(&self.backup_cache)
     }
 
-    async fn should_make_request(&self) -> bool {
+    async fn should_make_request(&self, _rc: &AuthorizedRequestContext) -> bool {
         true
     }
 }
@@ -149,7 +150,7 @@ impl RequestBuilderTrait for DcsRequestBuilder {
 pub struct IdlistRequestBuilder {
     pub http_observers: Arc<HttpDataProviderObserver>,
     pub backup_cache: Arc<dyn HttpDataProviderObserverTrait + Sync + Send>,
-    last_request: RwLock<Option<Instant>>,
+    last_request_by_key: RwLock<HashMap<String, Instant>>,
     last_response_hash: RwLock<HashMap<String, String>>,
 }
 
@@ -161,7 +162,7 @@ impl IdlistRequestBuilder {
         IdlistRequestBuilder {
             http_observers,
             backup_cache,
-            last_request: RwLock::new(None),
+            last_request_by_key: RwLock::new(HashMap::new()),
             last_response_hash: RwLock::new(HashMap::new()),
         }
     }
@@ -175,6 +176,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
         request_context: &AuthorizedRequestContext,
         _lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error> {
+        println!("Making request for: {}", request_context);
         match http_client
             .post("https://api.statsig.com/v1/get_id_lists".to_string())
             .header("statsig-api-key", request_context.sdk_key.clone())
@@ -222,16 +224,22 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
         Arc::clone(&self.backup_cache)
     }
 
-    async fn should_make_request(&self) -> bool {
-        let should_make_request = self.last_request.read().await.is_none()
-            || self.last_request.read().await.expect("validated").elapsed()
-                > Duration::from_secs(60);
+    async fn should_make_request(&self, rc: &AuthorizedRequestContext) -> bool {
+        let mut wlock = self.last_request_by_key.write().await;
+        let key = rc.to_string();
+        match wlock.get_mut(&key) {
+            Some(last_request) => {
+                if last_request.elapsed() > Duration::from_secs(60) {
+                    wlock.insert(key, Instant::now());
+                    return true;
+                }
 
-        // TODO: Make configurable, but for now, match sdk interval
-        if should_make_request {
-            *self.last_request.write().await = Some(Instant::now());
-            return true;
+                return false;
+            }
+            None => {
+                wlock.insert(key, Instant::now());
+                return true;
+            }
         }
-        false
     }
 }

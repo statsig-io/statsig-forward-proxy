@@ -5,6 +5,7 @@ use super::request_builder::CachedRequestBuilders;
 use super::{http_data_provider::HttpDataProvider, DataProviderRequestResult, DataProviderTrait};
 use std::{collections::HashMap, sync::Arc};
 
+
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration, Instant};
 
@@ -102,7 +103,7 @@ impl BackgroundDataProvider {
         for (request_context, lcut) in store_iter {
             let request_builder =
                 CachedRequestBuilders::get_request_builder(&request_context.path).await;
-            if !request_builder.should_make_request().await {
+            if !request_builder.should_make_request(&request_context).await {
                 continue;
             }
 
