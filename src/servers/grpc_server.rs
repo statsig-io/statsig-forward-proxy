@@ -147,7 +147,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         tokio::spawn(async move {
             tx.send(Ok(init_value)).await.ok();
             ProxyEventObserver::publish_event(
-                ProxyEvent::new(
+                ProxyEvent::new_with_rc(
                     ProxyEventType::GrpcStreamingStreamedInitialized,
                     &request_context,
                 )
@@ -164,7 +164,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                         Some(csr) => match tx.send(Ok(csr)).await {
                             Ok(_) => {
                                 ProxyEventObserver::publish_event(
-                                    ProxyEvent::new(
+                                    ProxyEvent::new_with_rc(
                                         ProxyEventType::GrpcStreamingStreamedResponse,
                                         &request_context,
                                     )
@@ -199,7 +199,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             }
 
             ProxyEventObserver::publish_event(
-                ProxyEvent::new(
+                ProxyEvent::new_with_rc(
                     ProxyEventType::GrpcStreamingStreamDisconnected,
                     &request_context,
                 )

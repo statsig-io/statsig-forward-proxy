@@ -83,10 +83,13 @@ impl StatsdLogger {
 impl ProxyEventObserverTrait for StatsdLogger {
     async fn handle_event(&self, event: &ProxyEvent) {
         if let Some(stat) = &event.stat {
-            let mut tags = vec![
-                format!("sdk_key:{}", event.sdk_key),
-                format!("path:{}", event.path),
-            ];
+            let mut tags = vec![];
+            if let Some(sdk_key) = &event.sdk_key {
+                tags.push(format!("sdk_key:{}", sdk_key));
+            }
+            if let Some(path) = &event.path {
+                tags.push(format!("path:{}", path));
+            }
             if let Some(lcut) = event.lcut {
                 tags.push(format!("lcut:{}", lcut));
             }

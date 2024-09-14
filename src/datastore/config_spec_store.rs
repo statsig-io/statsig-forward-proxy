@@ -73,7 +73,7 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                 w_lock.config = data.clone();
 
                 ProxyEventObserver::publish_event(
-                    ProxyEvent::new(
+                    ProxyEvent::new_with_rc(
                         ProxyEventType::UpdateConfigSpecStorePropagationDelayMs,
                         request_context,
                     )

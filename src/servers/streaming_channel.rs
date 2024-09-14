@@ -50,11 +50,14 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
             && result == &DataProviderRequestResult::DataAvailable
         {
             ProxyEventObserver::publish_event(
-                ProxyEvent::new(ProxyEventType::StreamingChannelGotNewData, request_context)
-                    .with_stat(EventStat {
-                        operation_type: OperationType::IncrByValue,
-                        value: 1,
-                    }),
+                ProxyEvent::new_with_rc(
+                    ProxyEventType::StreamingChannelGotNewData,
+                    request_context,
+                )
+                .with_stat(EventStat {
+                    operation_type: OperationType::IncrByValue,
+                    value: 1,
+                }),
             )
             .await;
             if self

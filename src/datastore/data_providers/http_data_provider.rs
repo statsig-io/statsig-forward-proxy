@@ -79,12 +79,15 @@ impl DataProviderTrait for HttpDataProvider {
                 .await
             {
                 ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::HttpDataProviderNoData, request_context)
-                        .with_lcut(lcut)
-                        .with_stat(EventStat {
-                            operation_type: OperationType::Distribution,
-                            value: ms,
-                        }),
+                    ProxyEvent::new_with_rc(
+                        ProxyEventType::HttpDataProviderNoData,
+                        request_context,
+                    )
+                    .with_lcut(lcut)
+                    .with_stat(EventStat {
+                        operation_type: OperationType::Distribution,
+                        value: ms,
+                    }),
                 )
                 .await;
                 DataProviderResult {
@@ -103,7 +106,7 @@ impl DataProviderTrait for HttpDataProvider {
                         Ok(value) => value,
                         Err(_) => {
                             ProxyEventObserver::publish_event(
-                                ProxyEvent::new(
+                                ProxyEvent::new_with_rc(
                                     ProxyEventType::HttpDataProviderNoDataDueToBadLcut,
                                     request_context,
                                 )
@@ -124,12 +127,15 @@ impl DataProviderTrait for HttpDataProvider {
                 };
 
                 ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::HttpDataProviderGotData, request_context)
-                        .with_lcut(since_time)
-                        .with_stat(EventStat {
-                            operation_type: OperationType::Distribution,
-                            value: ms,
-                        }),
+                    ProxyEvent::new_with_rc(
+                        ProxyEventType::HttpDataProviderGotData,
+                        request_context,
+                    )
+                    .with_lcut(since_time)
+                    .with_stat(EventStat {
+                        operation_type: OperationType::Distribution,
+                        value: ms,
+                    }),
                 )
                 .await;
                 DataProviderResult {
@@ -140,7 +146,7 @@ impl DataProviderTrait for HttpDataProvider {
         } else {
             eprintln!("Failed to get data from http provider: {:?}", err_msg);
             ProxyEventObserver::publish_event(
-                ProxyEvent::new(ProxyEventType::HttpDataProviderError, request_context)
+                ProxyEvent::new_with_rc(ProxyEventType::HttpDataProviderError, request_context)
                     .with_lcut(lcut)
                     .with_stat(EventStat {
                         operation_type: OperationType::Distribution,

@@ -1,6 +1,9 @@
 use crate::datatypes::log_event::{
     EventName, LogEvent, LogEventRequest, PossiblyLogEvent, StatsigMetadata,
 };
+use crate::observers::proxy_event_observer::ProxyEventObserver;
+use crate::observers::{EventStat, OperationType, ProxyEvent, ProxyEventType};
+use crate::servers::http_server::AuthorizedRequestContext;
 use chrono::{DateTime, Timelike, Utc};
 use futures::future::join_all;
 use std::hash::BuildHasher;
@@ -39,7 +42,9 @@ impl LogEventStore {
         &self,
         sdk_key: &str,
         mut data: LogEventRequest,
+        request_context: &AuthorizedRequestContext,
     ) -> Result<String, Status> {
+        let batch_in_size = data.events.len();
         data.events = join_all(
             data.events
                 .into_iter()
@@ -49,17 +54,25 @@ impl LogEventStore {
         .into_iter()
         .flatten()
         .collect();
-
+        let batch_out_size = data.events.len();
         let data_string = to_string(&data).map_err(|_| Status::new(500))?;
         // todo: ungzip + deduplicate + batching + regzip
         let response = self
             .http_client
             .post(&self.url)
             .header("statsig-api-key", sdk_key)
+            .header("statsig-event-count", batch_out_size)
             .body(data_string)
             .send()
             .await;
-
+        ProxyEventObserver::publish_event(
+            ProxyEvent::new_with_rc(ProxyEventType::LogEventStoreDeduped, request_context)
+                .with_stat(EventStat {
+                    operation_type: OperationType::IncrByValue,
+                    value: (batch_in_size - batch_out_size) as i64,
+                }),
+        )
+        .await;
         match response {
             Ok(res) => res.text().await,
             Err(e) => Err(e),
@@ -77,6 +90,15 @@ impl LogEventStore {
         let key = self.random_state.hash_one(event);
         let mut lock = self.dedupe_cache.write().await;
         if lock.len() >= self.dedupe_cache_limit {
+            ProxyEventObserver::publish_event(
+                ProxyEvent::new(ProxyEventType::LogEventStoreDedupeCacheCleared).with_stat(
+                    EventStat {
+                        operation_type: OperationType::IncrByValue,
+                        value: 1,
+                    },
+                ),
+            )
+            .await;
             lock.clear();
         }
         lock.insert(key)

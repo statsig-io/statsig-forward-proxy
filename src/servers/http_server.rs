@@ -162,7 +162,9 @@ async fn post_log_event(
     let store = log_event_store.inner().clone();
     tokio::spawn(async move {
         let body = request_body.into_inner();
-        let _ = store.log_event(&auth_header.sdk_key, body).await;
+        let _ = store
+            .log_event(&auth_header.sdk_key, body, &auth_header)
+            .await;
     });
     Custom(Status::Accepted, Json(LogEventResponse { success: true }))
 }
@@ -239,7 +241,7 @@ impl HttpServer {
                     );
                     if resp.status().class() == StatusClass::Success {
                         ProxyEventObserver::publish_event(
-                            ProxyEvent::new(
+                            ProxyEvent::new_with_rc(
                                 ProxyEventType::HttpServerRequestSuccess,
                                 &request_context,
                             )
@@ -251,7 +253,7 @@ impl HttpServer {
                         .await;
                     } else {
                         ProxyEventObserver::publish_event(
-                            ProxyEvent::new(
+                            ProxyEvent::new_with_rc(
                                 ProxyEventType::HttpServerRequestFailed,
                                 &request_context,
                             )

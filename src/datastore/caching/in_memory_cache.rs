@@ -54,30 +54,39 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
 
                 if lcut > record.lcut {
                     ProxyEventObserver::publish_event(
-                        ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSucceed, request_context)
-                            .with_stat(EventStat {
-                                operation_type: OperationType::IncrByValue,
-                                value: 1,
-                            }),
+                        ProxyEvent::new_with_rc(
+                            ProxyEventType::InMemoryCacheWriteSucceed,
+                            request_context,
+                        )
+                        .with_stat(EventStat {
+                            operation_type: OperationType::IncrByValue,
+                            value: 1,
+                        }),
                     )
                     .await;
                 } else {
                     ProxyEventObserver::publish_event(
-                        ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSkipped, request_context)
-                            .with_stat(EventStat {
-                                operation_type: OperationType::IncrByValue,
-                                value: 1,
-                            }),
+                        ProxyEvent::new_with_rc(
+                            ProxyEventType::InMemoryCacheWriteSkipped,
+                            request_context,
+                        )
+                        .with_stat(EventStat {
+                            operation_type: OperationType::IncrByValue,
+                            value: 1,
+                        }),
                     )
                     .await;
                 }
             } else {
                 ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::InMemoryCacheWriteSucceed, request_context)
-                        .with_stat(EventStat {
-                            operation_type: OperationType::IncrByValue,
-                            value: 1,
-                        }),
+                    ProxyEvent::new_with_rc(
+                        ProxyEventType::InMemoryCacheWriteSucceed,
+                        request_context,
+                    )
+                    .with_stat(EventStat {
+                        operation_type: OperationType::IncrByValue,
+                        value: 1,
+                    }),
                 )
                 .await;
             }
@@ -91,12 +100,11 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
 
     async fn get(&self, request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
         ProxyEventObserver::publish_event(
-            ProxyEvent::new(ProxyEventType::InMemoryCacheReadSucceed, request_context).with_stat(
-                EventStat {
+            ProxyEvent::new_with_rc(ProxyEventType::InMemoryCacheReadSucceed, request_context)
+                .with_stat(EventStat {
                     operation_type: OperationType::IncrByValue,
                     value: 1,
-                },
-            ),
+                }),
         )
         .await;
 

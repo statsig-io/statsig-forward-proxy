@@ -52,6 +52,8 @@ pub enum ProxyEventType {
     GrpcStreamingStreamDisconnected,
     StreamingChannelGotNewData,
     UpdateConfigSpecStorePropagationDelayMs,
+    LogEventStoreDeduped,
+    LogEventStoreDedupeCacheCleared,
 }
 
 #[derive(Clone, PartialEq, Debug, Copy)]
@@ -70,22 +72,33 @@ pub struct EventStat {
 
 pub struct ProxyEvent {
     pub event_type: ProxyEventType,
-    pub sdk_key: String,
-    pub path: String,
+    pub sdk_key: Option<String>,
+    pub path: Option<String>,
     pub lcut: Option<u64>,
     pub stat: Option<EventStat>,
     pub status_code: Option<u16>,
 }
 
 impl ProxyEvent {
-    pub fn new(
+    pub fn new_with_rc(
         event_type: ProxyEventType,
         request_context: &AuthorizedRequestContext,
     ) -> ProxyEvent {
         ProxyEvent {
             event_type,
-            sdk_key: request_context.sdk_key.clone(),
-            path: request_context.path.clone(),
+            sdk_key: Some(request_context.sdk_key.clone()),
+            path: Some(request_context.path.clone()),
+            lcut: None,
+            stat: None,
+            status_code: None,
+        }
+    }
+
+    pub fn new(event_type: ProxyEventType) -> ProxyEvent {
+        ProxyEvent {
+            event_type,
+            sdk_key: None,
+            path: None,
             lcut: None,
             stat: None,
             status_code: None,

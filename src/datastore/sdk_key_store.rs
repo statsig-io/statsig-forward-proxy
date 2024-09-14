@@ -63,7 +63,7 @@ impl SdkKeyStore {
     pub async fn has_key(&self, request_context: &AuthorizedRequestContext) -> bool {
         match self.keystore.read().await.contains_key(request_context) {
             true => {
-                ProxyEventObserver::publish_event(ProxyEvent::new(
+                ProxyEventObserver::publish_event(ProxyEvent::new_with_rc(
                     ProxyEventType::SdkKeyStoreCacheHit,
                     request_context,
                 ))
@@ -72,7 +72,7 @@ impl SdkKeyStore {
             }
             false => {
                 ProxyEventObserver::publish_event(
-                    ProxyEvent::new(ProxyEventType::SdkKeyStoreCacheMiss, request_context)
+                    ProxyEvent::new_with_rc(ProxyEventType::SdkKeyStoreCacheMiss, request_context)
                         .with_stat(EventStat {
                             operation_type: OperationType::IncrByValue,
                             value: 1,
