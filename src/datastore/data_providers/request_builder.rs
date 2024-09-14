@@ -176,7 +176,6 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
         request_context: &AuthorizedRequestContext,
         _lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error> {
-        println!("Making request for: {}", request_context);
         match http_client
             .post("https://api.statsig.com/v1/get_id_lists".to_string())
             .header("statsig-api-key", request_context.sdk_key.clone())
