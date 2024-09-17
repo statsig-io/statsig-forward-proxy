@@ -3,10 +3,10 @@ use super::data_providers::DataProviderRequestResult;
 use super::sdk_key_store::SdkKeyStore;
 use crate::observers::HttpDataProviderObserverTrait;
 use crate::servers::http_server::AuthorizedRequestContext;
-use std::collections::HashMap;
+use dashmap::DashMap;
 
+use parking_lot::RwLock;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[derive(Clone, Debug)]
 pub struct IdlistForCompany {
@@ -14,7 +14,7 @@ pub struct IdlistForCompany {
 }
 
 pub struct GetIdListStore {
-    store: Arc<RwLock<HashMap<AuthorizedRequestContext, Arc<RwLock<IdlistForCompany>>>>>,
+    store: Arc<DashMap<AuthorizedRequestContext, Arc<RwLock<IdlistForCompany>>>>,
     sdk_key_store: Arc<SdkKeyStore>,
     background_data_provider: Arc<BackgroundDataProvider>,
 }
@@ -36,25 +36,21 @@ impl HttpDataProviderObserverTrait for GetIdListStore {
         if result == &DataProviderRequestResult::Error
             || result == &DataProviderRequestResult::DataAvailable
         {
-            self.store.write().await.insert(
+            self.store.insert(
                 request_context.clone(),
                 Arc::new(RwLock::new(IdlistForCompany {
                     idlists: data.clone(),
                 })),
             );
         } else if result == &DataProviderRequestResult::Unauthorized {
-            let contains_key = self.store.read().await.contains_key(request_context);
-            if contains_key {
-                self.store.write().await.remove(request_context);
-            }
+            self.store.remove(request_context);
         }
     }
 
     async fn get(&self, request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
-        match self.store.read().await.get(request_context) {
-            Some(record) => Some(record.read().await.idlists.clone()),
-            None => None,
-        }
+        self.store
+            .get(request_context)
+            .map(|record| record.read().idlists.clone())
     }
 }
 
@@ -64,7 +60,7 @@ impl GetIdListStore {
         background_data_provider: Arc<BackgroundDataProvider>,
     ) -> Self {
         GetIdListStore {
-            store: Arc::new(RwLock::new(HashMap::new())),
+            store: Arc::new(DashMap::new()),
             sdk_key_store,
             background_data_provider,
         }
@@ -86,6 +82,6 @@ impl GetIdListStore {
             .await;
         }
 
-        self.store.read().await.get(request_context).cloned()
+        self.store.get(request_context).map(|r| r.clone())
     }
 }
