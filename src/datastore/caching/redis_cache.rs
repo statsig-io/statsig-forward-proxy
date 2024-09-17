@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use bb8_redis::{redis::AsyncCommands, RedisConnectionManager};
+use parking_lot::RwLock;
 use redis::aio::MultiplexedConnection;
-use tokio::sync::RwLock;
 
 use crate::{
     datastore::data_providers::DataProviderRequestResult,
@@ -91,11 +91,10 @@ impl RedisCache {
     }
 
     async fn hash_key(&self, key: &str) -> String {
-        if self.hash_cache.read().await.contains_key(key) {
+        if self.hash_cache.read().contains_key(key) {
             return self
                 .hash_cache
                 .read()
-                .await
                 .get(key)
                 .expect("Must have key")
                 .to_string();
@@ -106,7 +105,6 @@ impl RedisCache {
         let hashed_key = format!("{}::{:x}", self.key_prefix, Sha256::digest(key));
         self.hash_cache
             .write()
-            .await
             .insert(key.to_string(), hashed_key.clone());
         hashed_key
     }

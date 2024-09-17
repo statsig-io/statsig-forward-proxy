@@ -172,10 +172,8 @@ async fn create_config_spec_store(
     CachedRequestBuilders::add_request_builder(
         "/v1/download_config_specs/",
         dcs_request_builder.clone(),
-    )
-    .await;
-    CachedRequestBuilders::add_request_builder("/v2/download_config_specs/", dcs_request_builder)
-        .await;
+    );
+    CachedRequestBuilders::add_request_builder("/v2/download_config_specs/", dcs_request_builder);
     let config_spec_store = Arc::new(datastore::config_spec_store::ConfigSpecStore::new(
         sdk_key_store.clone(),
         background_data_provider.clone(),
@@ -221,7 +219,7 @@ async fn create_id_list_store(
         Arc::clone(&idlist_observer),
         Arc::clone(&shared_cache),
     ));
-    CachedRequestBuilders::add_request_builder("/v1/get_id_lists/", idlist_request_builder).await;
+    CachedRequestBuilders::add_request_builder("/v1/get_id_lists/", idlist_request_builder);
     let id_list_store = Arc::new(datastore::get_id_list_store::GetIdListStore::new(
         sdk_key_store.clone(),
         background_data_provider.clone(),

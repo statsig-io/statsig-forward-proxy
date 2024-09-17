@@ -87,8 +87,8 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             }
         };
         let reply = ConfigSpecResponse {
-            spec: data.read().await.config.to_string(),
-            last_updated: data.read().await.lcut,
+            spec: data.read().config.to_string(),
+            last_updated: data.read().lcut,
         };
         Ok(Response::new(reply))
     }

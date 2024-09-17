@@ -7,11 +7,11 @@ use crate::observers::{
     EventStat, HttpDataProviderObserverTrait, OperationType, ProxyEvent, ProxyEventType,
 };
 use crate::servers::http_server::AuthorizedRequestContext;
-use std::collections::HashMap;
+use dashmap::DashMap;
 
 use chrono::Utc;
+use parking_lot::RwLock;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[derive(Clone, Debug)]
 pub struct ConfigSpecForCompany {
@@ -20,7 +20,7 @@ pub struct ConfigSpecForCompany {
 }
 
 pub struct ConfigSpecStore {
-    store: Arc<RwLock<HashMap<AuthorizedRequestContext, Arc<RwLock<ConfigSpecForCompany>>>>>,
+    store: Arc<DashMap<AuthorizedRequestContext, Arc<RwLock<ConfigSpecForCompany>>>>,
     sdk_key_store: Arc<SdkKeyStore>,
     background_data_provider: Arc<BackgroundDataProvider>,
     no_update_payload: Arc<String>,
@@ -40,37 +40,39 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
         lcut: u64,
         data: &Arc<String>,
     ) {
-        let record = self.store.read().await.get(request_context).cloned();
-        if (result == &DataProviderRequestResult::Error
-            || result == &DataProviderRequestResult::DataAvailable)
-            && record.is_none()
-        {
-            self.store.write().await.insert(
-                request_context.clone(),
-                Arc::new(RwLock::new(ConfigSpecForCompany {
+        let should_insert = result == &DataProviderRequestResult::Error
+            || (result == &DataProviderRequestResult::DataAvailable
+                && !self.store.contains_key(request_context));
+
+        if should_insert {
+            let rc = request_context.clone();
+            let new_data = Arc::new(RwLock::new(ConfigSpecForCompany {
+                lcut,
+                config: data.clone(),
+            }));
+            self.store.insert(rc, new_data);
+            return;
+        }
+
+        if result == &DataProviderRequestResult::DataAvailable {
+            let stored_lcut = self
+                .store
+                .get(request_context)
+                .map(|record| record.read().lcut)
+                .unwrap_or(0);
+
+            if lcut > stored_lcut {
+                let new_data = ConfigSpecForCompany {
                     lcut,
                     config: data.clone(),
-                })),
-            );
-        } else if result == &DataProviderRequestResult::DataAvailable {
-            let stored_lcut = match record {
-                Some(record) => record.read().await.lcut,
-                None => 0,
-            };
-
-            // If LCUT is not newer, then there is nothing to save
-            if stored_lcut >= lcut {
-                return;
-            // Lcut is newer than stored lcut, so update everything
-            } else {
-                let hm_r_lock = self.store.read().await;
-                let mut w_lock = hm_r_lock
-                    .get(request_context)
-                    .expect("Record must exist")
-                    .write()
-                    .await;
-                w_lock.lcut = lcut;
-                w_lock.config = data.clone();
+                };
+                if let Some(entry) = self.store.get_mut(request_context) {
+                    *entry.write() = new_data;
+                } else {
+                    let rc = request_context.clone();
+                    let wrapped_data = Arc::new(RwLock::new(new_data));
+                    self.store.insert(rc, wrapped_data);
+                }
 
                 ProxyEventObserver::publish_event(
                     ProxyEvent::new_with_rc(
@@ -85,16 +87,15 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                 )
                 .await;
             }
-        } else if result == &DataProviderRequestResult::Unauthorized && record.is_some() {
-            self.store.write().await.remove(request_context);
+        } else if result == &DataProviderRequestResult::Unauthorized {
+            self.store.remove(request_context);
         }
     }
 
     async fn get(&self, request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
-        match self.store.read().await.get(request_context) {
-            Some(record) => Some(record.read().await.config.clone()),
-            None => None,
-        }
+        self.store
+            .get(request_context)
+            .map(|record| record.read().config.clone())
     }
 }
 
@@ -104,7 +105,7 @@ impl ConfigSpecStore {
         background_data_provider: Arc<BackgroundDataProvider>,
     ) -> Self {
         ConfigSpecStore {
-            store: Arc::new(RwLock::new(HashMap::new())),
+            store: Arc::new(DashMap::new()),
             sdk_key_store,
             background_data_provider,
             no_update_payload: Arc::new("{\"has_updates\":false}".to_string()),
@@ -134,20 +135,19 @@ impl ConfigSpecStore {
         //
         // If the payload for sinceTime 0 is greater than since_time
         // then return the full payload.
-        let read_lock = self.store.read().await;
-        let record = read_lock.get(request_context);
+        let record = self.store.get(request_context).map(|r| r.clone());
+
         match record {
             Some(record) => {
-                if record.read().await.lcut > since_time {
-                    Some(Arc::clone(record))
+                // Move the read operation outside the lock
+                let lcut = record.read().lcut;
+                if lcut > since_time {
+                    Some(record)
                 } else {
-                    Some(Arc::new(
-                        ConfigSpecForCompany {
-                            lcut: since_time,
-                            config: self.no_update_payload.clone(),
-                        }
-                        .into(),
-                    ))
+                    Some(Arc::new(RwLock::new(ConfigSpecForCompany {
+                        lcut: since_time,
+                        config: Arc::clone(&self.no_update_payload),
+                    })))
                 }
             }
             None => {

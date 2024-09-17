@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 
+use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
+use std::time::Instant;
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::{sync::RwLock, time::Instant};
 
 use crate::{
     observers::{
@@ -13,30 +14,21 @@ use crate::{
 
 use once_cell::sync::Lazy;
 
-type RequestBuilderCache = Lazy<
-    tokio::sync::RwLock<
-        std::sync::Arc<HashMap<std::string::String, std::sync::Arc<dyn RequestBuilderTrait>>>,
-    >,
->;
+type RequestBuilderCache = Lazy<Arc<RwLock<HashMap<String, Arc<dyn RequestBuilderTrait>>>>>;
 
-static REQUEST_BUILDERS: RequestBuilderCache = Lazy::new(|| {
-    tokio::sync::RwLock::new(Arc::new(
-        HashMap::<String, Arc<dyn RequestBuilderTrait>>::new(),
-    ))
-});
+static REQUEST_BUILDERS: RequestBuilderCache = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
 pub struct CachedRequestBuilders {}
 
 impl CachedRequestBuilders {
-    pub async fn add_request_builder(path: &str, request_builder: Arc<dyn RequestBuilderTrait>) {
-        let mut lock = REQUEST_BUILDERS.write().await;
-        let data_map = Arc::make_mut(&mut *lock);
-        data_map.insert(path.to_string(), request_builder);
+    pub fn add_request_builder(path: &str, request_builder: Arc<dyn RequestBuilderTrait>) {
+        let mut lock = REQUEST_BUILDERS.write();
+        lock.insert(path.to_string(), request_builder);
     }
 
-    pub async fn get_request_builder(path: &str) -> Arc<dyn RequestBuilderTrait> {
-        let lock = REQUEST_BUILDERS.read().await;
-        let data_map = Arc::clone(&*lock);
-        data_map.get(path).map(Arc::clone).unwrap_or_else(|| {
+    pub fn get_request_builder(path: &str) -> Arc<dyn RequestBuilderTrait> {
+        let lock = REQUEST_BUILDERS.read();
+        lock.get(path).cloned().unwrap_or_else(|| {
             eprintln!("No request builder found for path: {}", path);
             Arc::new(NoopRequestBuilder {})
         })
@@ -191,7 +183,6 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
                 if status_code == 401 || status_code == 403 {
                     self.last_response_hash
                         .write()
-                        .await
                         .remove(&request_context.sdk_key);
                 }
                 Ok(response)
@@ -202,7 +193,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
 
     async fn is_an_update(&self, body: &str, sdk_key: &str) -> bool {
         let hash = format!("{:x}", Sha256::digest(body));
-        let mut wlock = self.last_response_hash.write().await;
+        let mut wlock = self.last_response_hash.write();
         let mut is_an_update = true;
         if let Some(old_hash) = wlock.get(sdk_key) {
             is_an_update = hash != *old_hash;
@@ -224,7 +215,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
     }
 
     async fn should_make_request(&self, rc: &AuthorizedRequestContext) -> bool {
-        let mut wlock = self.last_request_by_key.write().await;
+        let mut wlock = self.last_request_by_key.write();
         let key = rc.to_string();
         match wlock.get_mut(&key) {
             Some(last_request) => {

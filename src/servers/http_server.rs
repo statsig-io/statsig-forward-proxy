@@ -115,7 +115,7 @@ async fn get_download_config_specs(
         .get_config_spec(&authorized_rc, sinceTime.unwrap_or(0))
         .await
     {
-        Some(data) => Ok(data.read().await.config.to_string()),
+        Some(data) => Ok(data.read().config.to_string()),
         None => Err(Status::Unauthorized),
     }
 }
@@ -137,7 +137,7 @@ async fn post_download_config_specs(
         .get_config_spec(&authorized_rc, dcs_request.since_time.unwrap_or(0))
         .await
     {
-        Some(data) => Ok(data.read().await.config.to_string()),
+        Some(data) => Ok(data.read().config.to_string()),
         None => Err(Status::Unauthorized),
     }
 }
@@ -148,7 +148,7 @@ async fn post_get_id_lists(
     authorized_rc: AuthorizedRequestContext,
 ) -> Result<String, Status> {
     match get_id_list_store.get_id_lists(&authorized_rc).await {
-        Some(data) => Ok(data.read().await.idlists.to_string()),
+        Some(data) => Ok(data.read().idlists.to_string()),
         None => Err(Status::Unauthorized),
     }
 }

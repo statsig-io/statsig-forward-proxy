@@ -3,8 +3,8 @@ use crate::servers::http_server::AuthorizedRequestContext;
 
 use super::request_builder::CachedRequestBuilders;
 use super::{http_data_provider::HttpDataProvider, DataProviderRequestResult, DataProviderTrait};
+use std::collections::hash_map::Entry;
 use std::{collections::HashMap, sync::Arc};
-
 
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration, Instant};
@@ -23,40 +23,47 @@ pub async fn foreground_fetch(
     since_time: u64,
     sdk_key_store: Arc<SdkKeyStore>,
 ) {
-    let mut master_lock = bdp.foreground_fetch_lock.write().await;
-    let lock_ref: Arc<RwLock<Option<Instant>>> = match master_lock.contains_key(request_context) {
-        true => Arc::clone(
-            master_lock
-                .get(request_context)
-                .expect("validated existence"),
-        ),
-        false => {
-            let new_lock_ref: Arc<RwLock<Option<Instant>>> = Arc::new(RwLock::new(None));
-            master_lock.insert(request_context.clone(), Arc::clone(&new_lock_ref));
-            new_lock_ref
+    let lock_ref: Arc<RwLock<Option<Instant>>> = {
+        let mut master_lock = bdp.foreground_fetch_lock.write().await;
+        match master_lock.entry(request_context.clone()) {
+            Entry::Occupied(entry) => Arc::clone(entry.get()),
+            Entry::Vacant(entry) => {
+                let new_lock_ref = Arc::new(RwLock::new(None));
+                entry.insert(Arc::clone(&new_lock_ref));
+                new_lock_ref
+            }
         }
     };
-    // Explicitly drop the master lock to allow other sdk keys to be processed
-    drop(master_lock);
 
-    // If already initialized, and we checked in the last minute
-    // then return
-    let mut per_key_lock = lock_ref.write().await;
-    if let Some(init_time) = *per_key_lock {
-        if !sdk_key_store.has_key(request_context).await
-            && Instant::now().duration_since(init_time) < Duration::from_secs(60)
-        {
-            return;
+    let should_fetch = {
+        let per_key_lock = lock_ref.read().await;
+        match *per_key_lock {
+            Some(init_time) => {
+                sdk_key_store.has_key(request_context).await
+                    || Instant::now().duration_since(init_time) >= Duration::from_secs(60)
+            }
+            None => true,
+        }
+    };
+
+    if should_fetch {
+        let mut per_key_lock = lock_ref.write().await;
+        // Double-check in case another thread updated while we were waiting for the write lock
+        if per_key_lock.is_none() || per_key_lock.unwrap().elapsed() >= Duration::from_secs(60) {
+            // Release the lock before the potentially long-running operation
+            *per_key_lock = Some(Instant::now());
+            drop(per_key_lock);
+
+            let mut data = HashMap::new();
+            data.insert(request_context.clone(), since_time);
+            BackgroundDataProvider::impl_foreground_fetch(
+                data.into_iter(),
+                &bdp.http_data_prover,
+                1,
+            )
+            .await;
         }
     }
-
-    // If we won the race, then initialize and set
-    // has initialized to true
-    let mut data = HashMap::new();
-    data.insert(request_context.clone(), since_time);
-    BackgroundDataProvider::impl_foreground_fetch(data.into_iter(), &bdp.http_data_prover, 1).await;
-
-    *per_key_lock = Some(Instant::now());
 }
 
 impl BackgroundDataProvider {
@@ -98,11 +105,10 @@ impl BackgroundDataProvider {
         data_provider: &Arc<HttpDataProvider>,
         update_batch_size: u64,
     ) {
-        let mut join_handles = Vec::new();
+        let mut join_handles = Vec::with_capacity(update_batch_size as usize);
 
         for (request_context, lcut) in store_iter {
-            let request_builder =
-                CachedRequestBuilders::get_request_builder(&request_context.path).await;
+            let request_builder = CachedRequestBuilders::get_request_builder(&request_context.path);
             if !request_builder.should_make_request(&request_context).await {
                 continue;
             }
@@ -117,11 +123,6 @@ impl BackgroundDataProvider {
                         .data
                         .expect("If data is available, data must exist");
 
-                    // [For DCS] Occassionally, origin will return the same payload multiple times
-                    // This could happen from cache inconsistency. If this happens,
-                    // rather than notifying, just skip updating anyone.
-                    //
-                    // This allows all listeners to not worry about doing double work
                     if !request_context.use_lcut || lcut != data.1 {
                         request_builder
                             .get_observers()
@@ -154,8 +155,7 @@ impl BackgroundDataProvider {
 
             join_handles.push(join_handle);
             if join_handles.len() >= (update_batch_size as usize) {
-                futures::future::join_all(join_handles).await;
-                join_handles = Vec::new();
+                futures::future::join_all(join_handles.drain(..)).await;
             }
         }
         futures::future::join_all(join_handles).await;

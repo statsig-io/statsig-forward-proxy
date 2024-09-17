@@ -30,15 +30,15 @@ impl ProxyEventObserver {
     }
 
     pub async fn publish_event(mut event: ProxyEvent) {
-        if let Some(sdk_key) = event.sdk_key {
-            event.sdk_key = Some(format!(
-                "{}{}",
-                sdk_key.chars().take(20).collect::<String>(),
-                "***"
-            ));
-        }
-
         task::spawn(async move {
+            if let Some(sdk_key) = event.sdk_key {
+                event.sdk_key = Some(format!(
+                    "{}{}",
+                    sdk_key.chars().take(20).collect::<String>(),
+                    "***"
+                ));
+            }
+
             for observer in PROXY_EVENT_OBSERVER.observers.read().await.iter() {
                 observer.handle_event(&event).await;
             }
