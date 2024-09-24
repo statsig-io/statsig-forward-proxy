@@ -19,13 +19,12 @@ pub struct BackgroundDataProvider {
 
 pub async fn foreground_fetch(
     bdp: Arc<BackgroundDataProvider>,
-    request_context: &AuthorizedRequestContext,
+    request_context: &Arc<AuthorizedRequestContext>,
     since_time: u64,
-    sdk_key_store: Arc<SdkKeyStore>,
 ) {
     let lock_ref: Arc<RwLock<Option<Instant>>> = {
         let mut master_lock = bdp.foreground_fetch_lock.write().await;
-        match master_lock.entry(request_context.clone()) {
+        match master_lock.entry(Arc::clone(request_context)) {
             Entry::Occupied(entry) => Arc::clone(entry.get()),
             Entry::Vacant(entry) => {
                 let new_lock_ref = Arc::new(RwLock::new(None));
@@ -37,32 +36,35 @@ pub async fn foreground_fetch(
 
     let should_fetch = {
         let per_key_lock = lock_ref.read().await;
-        match *per_key_lock {
-            Some(init_time) => {
-                sdk_key_store.has_key(request_context).await
-                    || Instant::now().duration_since(init_time) >= Duration::from_secs(60)
-            }
-            None => true,
-        }
+        should_perform_fetch(&per_key_lock)
     };
 
     if should_fetch {
         let mut per_key_lock = lock_ref.write().await;
+
         // Double-check in case another thread updated while we were waiting for the write lock
-        if per_key_lock.is_none() || per_key_lock.unwrap().elapsed() >= Duration::from_secs(60) {
+        if should_perform_fetch(&per_key_lock) {
             // Release the lock before the potentially long-running operation
             *per_key_lock = Some(Instant::now());
-            drop(per_key_lock);
 
-            let mut data = HashMap::new();
-            data.insert(request_context.clone(), since_time);
             BackgroundDataProvider::impl_foreground_fetch(
-                data.into_iter(),
+                vec![(Arc::clone(request_context), since_time)],
                 &bdp.http_data_prover,
                 1,
             )
             .await;
         }
+    }
+}
+
+fn should_perform_fetch(per_key_lock: &Option<Instant>) -> bool {
+    match *per_key_lock {
+        Some(init_time) => {
+            let duration = Instant::now().duration_since(init_time);
+            println!("Duration since last fetch: {:?}", duration);
+            duration >= Duration::from_secs(30)
+        }
+        None => true,
     }
 }
 
