@@ -2,14 +2,14 @@ use async_trait::async_trait;
 
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
-use std::time::Instant;
 use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::time::Instant;
 
 use crate::{
     observers::{
         http_data_provider_observer::HttpDataProviderObserver, HttpDataProviderObserverTrait,
     },
-    servers::http_server::AuthorizedRequestContext,
+    servers::authorized_request_context::AuthorizedRequestContext,
 };
 
 use once_cell::sync::Lazy;
@@ -40,13 +40,13 @@ pub trait RequestBuilderTrait: Send + Sync + 'static {
     async fn make_request(
         &self,
         http_client: &reqwest::Client,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error>;
     async fn is_an_update(&self, body: &str, sdk_key: &str) -> bool;
     fn get_observers(&self) -> Arc<HttpDataProviderObserver>;
     fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send>;
-    async fn should_make_request(&self, rc: &AuthorizedRequestContext) -> bool;
+    async fn should_make_request(&self, rc: &Arc<AuthorizedRequestContext>) -> bool;
 }
 
 pub struct NoopRequestBuilder {}
@@ -56,7 +56,7 @@ impl RequestBuilderTrait for NoopRequestBuilder {
     async fn make_request(
         &self,
         _http_client: &reqwest::Client,
-        _request_context: &AuthorizedRequestContext,
+        _request_context: &Arc<AuthorizedRequestContext>,
         _lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error> {
         unimplemented!()
@@ -74,7 +74,7 @@ impl RequestBuilderTrait for NoopRequestBuilder {
         unimplemented!()
     }
 
-    async fn should_make_request(&self, _rc: &AuthorizedRequestContext) -> bool {
+    async fn should_make_request(&self, _rc: &Arc<AuthorizedRequestContext>) -> bool {
         false
     }
 }
@@ -104,7 +104,7 @@ impl RequestBuilderTrait for DcsRequestBuilder {
     async fn make_request(
         &self,
         http_client: &reqwest::Client,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let url = match lcut == 0 {
@@ -134,7 +134,7 @@ impl RequestBuilderTrait for DcsRequestBuilder {
         Arc::clone(&self.backup_cache)
     }
 
-    async fn should_make_request(&self, _rc: &AuthorizedRequestContext) -> bool {
+    async fn should_make_request(&self, _rc: &Arc<AuthorizedRequestContext>) -> bool {
         true
     }
 }
@@ -165,7 +165,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
     async fn make_request(
         &self,
         http_client: &reqwest::Client,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         _lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error> {
         match http_client
@@ -214,7 +214,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
         Arc::clone(&self.backup_cache)
     }
 
-    async fn should_make_request(&self, rc: &AuthorizedRequestContext) -> bool {
+    async fn should_make_request(&self, rc: &Arc<AuthorizedRequestContext>) -> bool {
         let mut wlock = self.last_request_by_key.write();
         let key = rc.to_string();
         match wlock.get_mut(&key) {

@@ -10,7 +10,7 @@ use crate::{
         proxy_event_observer::ProxyEventObserver, HttpDataProviderObserverTrait, ProxyEvent,
         ProxyEventType,
     },
-    servers::http_server::AuthorizedRequestContext,
+    servers::authorized_request_context::AuthorizedRequestContext,
 };
 
 use crate::observers::EventStat;
@@ -120,9 +120,9 @@ impl HttpDataProviderObserverTrait for RedisCache {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<String>,
+        data: &Arc<str>,
     ) {
         if result == &DataProviderRequestResult::DataAvailable {
             let connection: Result<
@@ -196,8 +196,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                         operation_type: OperationType::IncrByValue,
                                         value: 1,
                                     }),
-                                )
-                                .await;
+                                );
                             }
                             Err(e) => {
                                 ProxyEventObserver::publish_event(
@@ -209,8 +208,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                         operation_type: OperationType::IncrByValue,
                                         value: 1,
                                     }),
-                                )
-                                .await;
+                                );
                                 eprintln!("Failed to set key in redis: {:?}", e);
                             }
                         }
@@ -224,8 +222,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
                             }),
-                        )
-                        .await;
+                        );
                     }
                 }
                 Err(e) => {
@@ -238,8 +235,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                             operation_type: OperationType::IncrByValue,
                             value: 1,
                         }),
-                    )
-                    .await;
+                    );
                     eprintln!(
                         "Failed to get connection to redis, failed to update key: {:?}",
                         e
@@ -263,8 +259,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
                             }),
-                        )
-                        .await;
+                        );
                     }
                     Err(e) => {
                         ProxyEventObserver::publish_event(
@@ -276,8 +271,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
                             }),
-                        )
-                        .await;
+                        );
                         eprintln!("Failed to delete key in redis: {:?}", e);
                     }
                 },
@@ -291,8 +285,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                             operation_type: OperationType::IncrByValue,
                             value: 1,
                         }),
-                    )
-                    .await;
+                    );
                     eprintln!(
                         "Failed to get connection to redis, failed to delete key: {:?}",
                         e
@@ -302,7 +295,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
         }
     }
 
-    async fn get(&self, request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
+    async fn get(&self, request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
         let connection = self.connection.get().await;
         match connection {
             Ok(mut conn) => {
@@ -321,8 +314,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                     operation_type: OperationType::IncrByValue,
                                     value: 1,
                                 }),
-                            )
-                            .await;
+                            );
                             None
                         } else {
                             ProxyEventObserver::publish_event(
@@ -334,9 +326,8 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                     operation_type: OperationType::IncrByValue,
                                     value: 1,
                                 }),
-                            )
-                            .await;
-                            Some(Arc::new(data.first().expect("Must have data").to_owned()))
+                            );
+                            Some(Arc::from(data.first().expect("Must have data").to_owned()))
                         }
                     }
                     Err(e) => {
@@ -349,8 +340,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
                             }),
-                        )
-                        .await;
+                        );
                         eprintln!("Failed to get key from redis: {:?}", e);
                         None
                     }
@@ -363,8 +353,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                             operation_type: OperationType::IncrByValue,
                             value: 1,
                         }),
-                )
-                .await;
+                );
                 eprintln!("Failed to get connection to redis: {:?}", e);
                 None
             }

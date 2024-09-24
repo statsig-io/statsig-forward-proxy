@@ -1,6 +1,9 @@
 use lazy_static::lazy_static;
 use std::sync::Arc;
-use tokio::{sync::RwLock, task};
+use tokio::{
+    runtime::Handle,
+    sync::broadcast::{self, Sender},
+};
 
 use super::{ProxyEvent, ProxyEventObserverTrait};
 
@@ -9,7 +12,7 @@ lazy_static! {
 }
 
 pub struct ProxyEventObserver {
-    observers: Arc<RwLock<Vec<Arc<dyn ProxyEventObserverTrait + Send + Sync>>>>,
+    pub sender: Arc<Sender<Arc<ProxyEvent>>>,
 }
 
 impl Default for ProxyEventObserver {
@@ -20,28 +23,34 @@ impl Default for ProxyEventObserver {
 
 impl ProxyEventObserver {
     pub fn new() -> Self {
+        let (tx, _rx) = broadcast::channel(1000);
         ProxyEventObserver {
-            observers: Arc::new(RwLock::new(vec![])),
+            sender: Arc::new(tx),
         }
     }
 
     pub async fn add_observer(observer: Arc<dyn ProxyEventObserverTrait + Send + Sync>) {
-        PROXY_EVENT_OBSERVER.observers.write().await.push(observer);
+        let mut reader = PROXY_EVENT_OBSERVER.sender.subscribe();
+        rocket::tokio::task::spawn_blocking(move || {
+            Handle::current().block_on(async move {
+                loop {
+                    match reader.recv().await {
+                        Ok(event) => {
+                            observer.handle_event(&event).await;
+                        }
+                        Err(e) => {
+                            eprintln!("[sfp] event writer dropped... removing reader...: {}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+        });
     }
 
-    pub async fn publish_event(mut event: ProxyEvent) {
-        task::spawn(async move {
-            if let Some(sdk_key) = event.sdk_key {
-                event.sdk_key = Some(format!(
-                    "{}{}",
-                    sdk_key.chars().take(20).collect::<String>(),
-                    "***"
-                ));
-            }
-
-            for observer in PROXY_EVENT_OBSERVER.observers.read().await.iter() {
-                observer.handle_event(&event).await;
-            }
-        });
+    pub fn publish_event(event: ProxyEvent) {
+        if let Err(e) = PROXY_EVENT_OBSERVER.sender.send(Arc::new(event)) {
+            eprintln!("[sfp] Dropping event... Buffer limit hit... {}", e);
+        }
     }
 }

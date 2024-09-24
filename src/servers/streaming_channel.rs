@@ -7,23 +7,23 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
 
 use super::grpc_server::statsig_forward_proxy::ConfigSpecResponse;
-use super::http_server::AuthorizedRequestContext;
 use crate::observers::proxy_event_observer::ProxyEventObserver;
 use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{ProxyEvent, ProxyEventType};
+use crate::servers::authorized_request_context::AuthorizedRequestContext;
 
 pub struct StreamingChannel {
-    request_context: AuthorizedRequestContext,
+    request_context: Arc<AuthorizedRequestContext>,
     last_updated: Arc<RwLock<u64>>,
     pub sender: Arc<RwLock<Sender<Option<ConfigSpecResponse>>>>,
 }
 
 impl StreamingChannel {
-    pub fn new(request_context: &AuthorizedRequestContext) -> Self {
+    pub fn new(request_context: Arc<AuthorizedRequestContext>) -> Self {
         let (tx, _rx) = broadcast::channel(1);
         StreamingChannel {
-            request_context: request_context.clone(),
+            request_context,
             last_updated: Arc::new(RwLock::new(0)),
             sender: Arc::new(RwLock::new(tx)),
         }
@@ -39,9 +39,9 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<String>,
+        data: &Arc<str>,
     ) {
         let mut wlock = self.last_updated.write().await;
         let is_newer_lcut = lcut > *wlock;
@@ -58,8 +58,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
                     operation_type: OperationType::IncrByValue,
                     value: 1,
                 }),
-            )
-            .await;
+            );
             if self
                 .sender
                 .write()
@@ -79,7 +78,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
         }
     }
 
-    async fn get(&self, _request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
+    async fn get(&self, _request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
         unimplemented!("Not Used")
     }
 }

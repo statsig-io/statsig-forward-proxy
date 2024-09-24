@@ -1,16 +1,10 @@
 use super::data_providers::DataProviderRequestResult;
-use crate::observers::{
-    proxy_event_observer::ProxyEventObserver, HttpDataProviderObserverTrait, ProxyEvent,
-    ProxyEventType,
-};
-use crate::observers::{EventStat, OperationType};
-use crate::servers::http_server::AuthorizedRequestContext;
+use crate::observers::HttpDataProviderObserverTrait;
+use crate::servers::authorized_request_context::AuthorizedRequestContext;
 use async_trait::async_trait;
+use dashmap::DashMap;
 
-use std::collections::hash_map::IntoIter;
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 #[async_trait]
 impl HttpDataProviderObserverTrait for SdkKeyStore {
     fn force_notifier_to_wait_for_update(&self) -> bool {
@@ -20,31 +14,35 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        _data: &Arc<String>,
+        _data: &Arc<str>,
     ) {
-        if result == &DataProviderRequestResult::DataAvailable {
-            let mut write_lock = self.keystore.write().await;
-            if !request_context.use_lcut || *write_lock.get(request_context).unwrap_or(&0) < lcut {
-                write_lock.insert(request_context.clone(), lcut);
+        let write_lock = self.keystore.clone();
+        match result {
+            DataProviderRequestResult::DataAvailable => {
+                if !request_context.use_lcut
+                    || write_lock.get(request_context).map_or(true, |v| *v < lcut)
+                {
+                    write_lock.insert(Arc::clone(request_context), lcut);
+                }
             }
-        } else if result == &DataProviderRequestResult::Unauthorized {
-            let contains_key = self.keystore.read().await.contains_key(request_context);
-            if contains_key {
-                self.keystore.write().await.remove(request_context);
+            DataProviderRequestResult::Unauthorized => {
+                if write_lock.contains_key(request_context) {
+                    write_lock.remove(request_context);
+                }
             }
+            _ => {}
         }
     }
 
-    async fn get(&self, _request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
-        // Not used
+    async fn get(&self, _request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
         None
     }
 }
 
 pub struct SdkKeyStore {
-    keystore: Arc<RwLock<HashMap<AuthorizedRequestContext, u64>>>,
+    keystore: Arc<DashMap<Arc<AuthorizedRequestContext>, u64>>,
 }
 
 impl Default for SdkKeyStore {
@@ -56,35 +54,18 @@ impl Default for SdkKeyStore {
 impl SdkKeyStore {
     pub fn new() -> SdkKeyStore {
         SdkKeyStore {
-            keystore: Arc::new(RwLock::new(HashMap::new())),
+            keystore: Arc::new(DashMap::new()),
         }
     }
 
-    pub async fn has_key(&self, request_context: &AuthorizedRequestContext) -> bool {
-        match self.keystore.read().await.contains_key(request_context) {
-            true => {
-                ProxyEventObserver::publish_event(ProxyEvent::new_with_rc(
-                    ProxyEventType::SdkKeyStoreCacheHit,
-                    request_context,
-                ))
-                .await;
-                true
-            }
-            false => {
-                ProxyEventObserver::publish_event(
-                    ProxyEvent::new_with_rc(ProxyEventType::SdkKeyStoreCacheMiss, request_context)
-                        .with_stat(EventStat {
-                            operation_type: OperationType::IncrByValue,
-                            value: 1,
-                        }),
-                )
-                .await;
-                false
-            }
-        }
+    pub fn has_key(&self, request_context: &Arc<AuthorizedRequestContext>) -> bool {
+        self.keystore.contains_key(request_context)
     }
 
-    pub async fn get_registered_store(&self) -> IntoIter<AuthorizedRequestContext, u64> {
-        self.keystore.read().await.clone().into_iter()
+    pub async fn get_registered_store(&self) -> Vec<(Arc<AuthorizedRequestContext>, u64)> {
+        self.keystore
+            .iter()
+            .map(|entry| (entry.key().clone(), *entry.value()))
+            .collect()
     }
 }

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use tokio::{sync::RwLock, task};
+use tokio::sync::RwLock;
 
 use crate::{
     datastore::data_providers::DataProviderRequestResult,
-    servers::http_server::AuthorizedRequestContext,
+    servers::authorized_request_context::AuthorizedRequestContext,
 };
 
 use super::HttpDataProviderObserverTrait;
@@ -36,28 +36,33 @@ impl HttpDataProviderObserver {
     pub async fn notify_all(
         &self,
         result: &DataProviderRequestResult,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<String>,
+        data: &Arc<str>,
     ) {
-        let result_copy = *result;
-        let rc_clone = request_context.clone();
-        let data_copy = Arc::clone(data);
-        let shared_observer = self.observers.clone();
-        task::spawn(async move {
-            for observer in shared_observer.read().await.iter() {
-                if !observer.force_notifier_to_wait_for_update() {
+        let (async_observers, sync_observers): (Vec<_>, Vec<_>) = {
+            let observers = self.observers.read().await;
+            observers
+                .iter()
+                .cloned()
+                .partition(|o| !o.force_notifier_to_wait_for_update())
+        };
+
+        if !async_observers.is_empty() {
+            let result_copy = *result;
+            let rc_clone = Arc::clone(request_context);
+            let data_copy = Arc::clone(data);
+            rocket::tokio::spawn(async move {
+                for observer in async_observers {
                     observer
                         .update(&result_copy, &rc_clone, lcut, &data_copy)
                         .await;
                 }
-            }
-        });
+            });
+        }
 
-        for observer in self.observers.read().await.iter() {
-            if observer.force_notifier_to_wait_for_update() {
-                observer.update(result, request_context, lcut, data).await;
-            }
+        for observer in sync_observers {
+            observer.update(result, request_context, lcut, data).await;
         }
     }
 }

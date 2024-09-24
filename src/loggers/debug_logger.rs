@@ -21,13 +21,13 @@ impl ProxyEventObserverTrait for DebugLogger {
         println!(
             "[Debug][Event: {:?}] sdk_key: {:?}, lcut: {}, stat: {:?}, path: {:?}",
             event.event_type,
-            event.sdk_key,
+            event.get_sdk_key(),
             match event.lcut {
                 Some(lcut) => lcut.to_string(),
                 None => "None".to_string(),
             },
             event.stat,
-            event.path
+            event.get_path()
         );
     }
 }

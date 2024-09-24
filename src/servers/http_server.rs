@@ -1,7 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::datastore::get_id_list_store::GetIdListStore;
-
 use crate::datastore::log_event_store::LogEventStore;
 use crate::datatypes::gzip_data::LoggedBodyJSON;
 use crate::datatypes::log_event::LogEventRequest;
@@ -15,77 +15,28 @@ use rocket::fairing::AdHoc;
 use rocket::http::StatusClass;
 use rocket::http::{Header, Status};
 use rocket::post;
-use rocket::request::Outcome;
-use rocket::request::{self, FromRequest, Request};
 use rocket::response::status::Custom;
 use rocket::routes;
 
 use rocket::serde::json::Json;
 
+use rocket::Request;
 use rocket::State;
 use rocket::{catch, catchers, get};
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Handle;
+use tokio::sync::RwLock;
 use tokio::time::Instant;
 
 use crate::datastore::config_spec_store::ConfigSpecStore;
 use crate::observers::proxy_event_observer::ProxyEventObserver;
 
+// Import the new module
+use crate::servers::authorized_request_context::{
+    AuthorizedRequestContextCache, AuthorizedRequestContextWrapper,
+};
+
 pub struct TimerStart(pub Option<Instant>);
-
-#[derive(Debug)]
-pub struct AuthError;
-
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub struct AuthorizedRequestContext {
-    pub sdk_key: String,
-    pub path: String,
-    pub use_lcut: bool,
-}
-
-impl AuthorizedRequestContext {
-    pub fn new(sdk_key: String, path: String) -> Self {
-        let mut normalized_path = path;
-        if normalized_path.ends_with(".json") || normalized_path.ends_with(".js") {
-            if let Some(pos) = normalized_path.rfind('/') {
-                normalized_path = normalized_path[..pos + 1].to_string();
-            }
-        }
-
-        if !normalized_path.ends_with('/') {
-            normalized_path.push('/');
-        }
-
-        let use_lcut = normalized_path.ends_with("download_config_specs");
-        AuthorizedRequestContext {
-            sdk_key,
-            path: normalized_path.clone(),
-            use_lcut,
-        }
-    }
-}
-
-impl std::fmt::Display for AuthorizedRequestContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}|{}", self.sdk_key, self.path)
-    }
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for AuthorizedRequestContext {
-    type Error = AuthError;
-
-    async fn from_request(request: &'r Request<'_>) -> request::Outcome<Self, Self::Error> {
-        let headers = request.headers();
-
-        match headers.get_one("statsig-api-key") {
-            Some(sdk_key) => Outcome::Success(AuthorizedRequestContext::new(
-                sdk_key.to_string(),
-                request.uri().path().to_string(),
-            )),
-            None => Outcome::Error((Status::BadRequest, AuthError)),
-        }
-    }
-}
 
 #[derive(Serialize, Deserialize)]
 pub struct DefaultResponse {
@@ -109,13 +60,13 @@ async fn get_download_config_specs(
     config_spec_store: &State<Arc<ConfigSpecStore>>,
     #[allow(unused_variables)] sdk_key_file: &str,
     #[allow(non_snake_case)] sinceTime: Option<u64>,
-    authorized_rc: AuthorizedRequestContext,
-) -> Result<String, Status> {
+    authorized_rc: AuthorizedRequestContextWrapper,
+) -> Result<Arc<str>, Status> {
     match config_spec_store
-        .get_config_spec(&authorized_rc, sinceTime.unwrap_or(0))
+        .get_config_spec(&authorized_rc.inner(), sinceTime.unwrap_or(0))
         .await
     {
-        Some(data) => Ok(data.read().config.to_string()),
+        Some(data) => Ok(Arc::clone(&data.config)),
         None => Err(Status::Unauthorized),
     }
 }
@@ -130,14 +81,14 @@ pub struct DcsRequest {
 async fn post_download_config_specs(
     dcs_request_json: Json<DcsRequest>,
     config_spec_store: &State<Arc<ConfigSpecStore>>,
-    authorized_rc: AuthorizedRequestContext,
-) -> Result<String, Status> {
+    authorized_rc: AuthorizedRequestContextWrapper,
+) -> Result<Arc<str>, Status> {
     let dcs_request = dcs_request_json.into_inner();
     match config_spec_store
-        .get_config_spec(&authorized_rc, dcs_request.since_time.unwrap_or(0))
+        .get_config_spec(&authorized_rc.inner(), dcs_request.since_time.unwrap_or(0))
         .await
     {
-        Some(data) => Ok(data.read().config.to_string()),
+        Some(data) => Ok(Arc::clone(&data.config)),
         None => Err(Status::Unauthorized),
     }
 }
@@ -145,38 +96,41 @@ async fn post_download_config_specs(
 #[post("/get_id_lists")]
 async fn post_get_id_lists(
     get_id_list_store: &State<Arc<GetIdListStore>>,
-    authorized_rc: AuthorizedRequestContext,
-) -> Result<String, Status> {
-    match get_id_list_store.get_id_lists(&authorized_rc).await {
-        Some(data) => Ok(data.read().idlists.to_string()),
+    authorized_rc: AuthorizedRequestContextWrapper,
+) -> Result<Arc<str>, Status> {
+    match get_id_list_store.get_id_lists(&authorized_rc.inner()).await {
+        Some(data) => Ok(Arc::clone(&data.idlists)),
         None => Err(Status::Unauthorized),
     }
 }
 
 #[post("/log_event", data = "<request_body>")]
-async fn post_log_event(
+fn post_log_event(
     log_event_store: &State<Arc<LogEventStore>>,
     request_body: LoggedBodyJSON<LogEventRequest>,
-    auth_header: AuthorizedRequestContext,
+    auth_header: AuthorizedRequestContextWrapper,
 ) -> Custom<Json<LogEventResponse>> {
     let store = log_event_store.inner().clone();
-    tokio::spawn(async move {
+    rocket::tokio::task::spawn_blocking(move || {
         let body = request_body.into_inner();
-        let _ = store
-            .log_event(&auth_header.sdk_key, body, &auth_header)
-            .await;
+        Handle::current().block_on(store.log_event(body, &auth_header.inner()))
     });
     Custom(Status::Accepted, Json(LogEventResponse { success: true }))
 }
 
 pub struct HttpServer {}
 
+pub struct SdkKeyCache(pub RwLock<HashMap<String, String>>);
+
 impl HttpServer {
     pub async fn start_server(
         config_spec_store: Arc<ConfigSpecStore>,
         id_list_store: Arc<GetIdListStore>,
         log_event_store: Arc<LogEventStore>,
+        rc_cache: Arc<AuthorizedRequestContextCache>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let sdk_key_cache = SdkKeyCache(RwLock::new(HashMap::new()));
+
         rocket::build()
             .mount(
                 "/v1",
@@ -197,6 +151,8 @@ impl HttpServer {
             .manage(config_spec_store)
             .manage(id_list_store)
             .manage(log_event_store)
+            .manage(rc_cache)
+            .manage(sdk_key_cache)
             .attach(AdHoc::on_request("Normalize SDK Key", |req, _| {
                 Box::pin(async move {
                     req.local_cache(|| TimerStart(Some(Instant::now())));
@@ -206,65 +162,73 @@ impl HttpServer {
                     }
 
                     if req.method() == rocket::http::Method::Get {
-                        let mut path = req.uri().path().to_string();
-                        if path.ends_with(".json") || path.ends_with(".js") {
-                            if let Some(pos) = path.rfind('/') {
-                                path = path[pos..].to_string();
-                            }
+                        let path = req.uri().path().to_string();
+                        let sdk_key_cache = req.rocket().state::<SdkKeyCache>().unwrap();
+
+                        // Try to read from the cache first
+                        if let Some(sdk_key) = sdk_key_cache.0.read().await.get(&path).cloned() {
+                            req.add_header(Header::new("statsig-api-key", sdk_key));
+                            return;
                         }
-                        let sdk_key = path
+
+                        // If not in cache, compute the new key
+                        let new_key = path
                             .strip_suffix(".json")
-                            .unwrap_or_else(|| path.strip_suffix(".js").unwrap_or(&path));
-                        req.add_header(Header::new("statsig-api-key", sdk_key.to_string()));
+                            .or_else(|| path.strip_suffix(".js"))
+                            .unwrap_or(&path)
+                            .rsplit_once('/')
+                            .map_or(path.clone(), |(_, key)| key.to_string());
+
+                        // Insert the new key into the cache
+                        sdk_key_cache.0.write().await.insert(path, new_key.clone());
+
+                        req.add_header(Header::new("statsig-api-key", new_key));
                     }
                 })
             }))
             .attach(AdHoc::on_response("Logger", |req, resp| {
                 Box::pin(async move {
-                    let start_time = req.local_cache(|| TimerStart(None));
-                    let mut ms = -2;
-                    if let Some(duration) = start_time.0.map(|st| st.elapsed()) {
-                        ms = match i64::try_from(
-                            duration.as_secs() * 1000 + (duration.subsec_millis() as u64),
-                        ) {
-                            Ok(ms) => ms,
-                            Err(_err) => -2,
-                        };
-                    }
+                    let ms = req
+                        .local_cache(|| TimerStart(Some(Instant::now())))
+                        .0
+                        .map_or(-2, |start| {
+                            start.elapsed().as_millis().try_into().unwrap_or(-2)
+                        });
 
-                    let request_context = AuthorizedRequestContext::new(
-                        req.headers()
-                            .get_one("statsig-api-key")
-                            .unwrap_or("no-key-provided")
-                            .to_string(),
-                        req.uri().path().to_string(),
-                    );
-                    if resp.status().class() == StatusClass::Success {
-                        ProxyEventObserver::publish_event(
-                            ProxyEvent::new_with_rc(
-                                ProxyEventType::HttpServerRequestSuccess,
-                                &request_context,
-                            )
-                            .with_stat(EventStat {
-                                operation_type: OperationType::Distribution,
-                                value: ms,
-                            }),
+                    let cache = req
+                        .rocket()
+                        .state::<Arc<AuthorizedRequestContextCache>>()
+                        .unwrap()
+                        .clone();
+                    let sdk_key = req
+                        .headers()
+                        .get_one("statsig-api-key")
+                        .unwrap_or("no-key-provided")
+                        .to_string();
+                    let path = req.uri().path().to_string();
+                    let status_code = resp.status().code;
+                    let status_class = resp.status().class();
+
+                    // Spawn a new task to handle logging
+                    tokio::spawn(async move {
+                        let request_context = cache.get_or_insert(sdk_key, path);
+
+                        let event = ProxyEvent::new_with_rc(
+                            if status_class == StatusClass::Success {
+                                ProxyEventType::HttpServerRequestSuccess
+                            } else {
+                                ProxyEventType::HttpServerRequestFailed
+                            },
+                            &request_context,
                         )
-                        .await;
-                    } else {
-                        ProxyEventObserver::publish_event(
-                            ProxyEvent::new_with_rc(
-                                ProxyEventType::HttpServerRequestFailed,
-                                &request_context,
-                            )
-                            .with_stat(EventStat {
-                                operation_type: OperationType::Distribution,
-                                value: ms,
-                            })
-                            .with_status_code(resp.status().code),
-                        )
-                        .await;
-                    }
+                        .with_status_code(status_code)
+                        .with_stat(EventStat {
+                            operation_type: OperationType::Distribution,
+                            value: ms,
+                        });
+
+                        ProxyEventObserver::publish_event(event);
+                    });
                 })
             }))
             .register("/", catchers![default_catcher])

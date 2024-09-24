@@ -1,20 +1,22 @@
 use crate::datastore::sdk_key_store::SdkKeyStore;
-use crate::servers::http_server::AuthorizedRequestContext;
+use crate::servers::authorized_request_context::AuthorizedRequestContext;
 
-use super::request_builder::CachedRequestBuilders;
+use super::request_builder::{CachedRequestBuilders, RequestBuilderTrait};
 use super::{http_data_provider::HttpDataProvider, DataProviderRequestResult, DataProviderTrait};
 use std::collections::hash_map::Entry;
 use std::{collections::HashMap, sync::Arc};
 
+use tokio::runtime::Handle;
 use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant};
 
 pub struct BackgroundDataProvider {
     http_data_prover: Arc<HttpDataProvider>,
     polling_interval_in_s: u64,
     update_batch_size: u64,
     sdk_key_store: Arc<SdkKeyStore>,
-    foreground_fetch_lock: RwLock<HashMap<AuthorizedRequestContext, Arc<RwLock<Option<Instant>>>>>,
+    foreground_fetch_lock:
+        RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<RwLock<Option<Instant>>>>>,
 }
 
 pub async fn foreground_fetch(
@@ -89,21 +91,23 @@ impl BackgroundDataProvider {
         let batch_size = self.update_batch_size;
         let polling_interval_in_s = self.polling_interval_in_s;
         let sdk_key_store = Arc::clone(&self.sdk_key_store);
-        tokio::spawn(async move {
-            loop {
-                BackgroundDataProvider::impl_foreground_fetch(
-                    sdk_key_store.get_registered_store().await,
-                    &shared_data_provider,
-                    batch_size,
-                )
-                .await;
-                sleep(Duration::from_secs(polling_interval_in_s)).await;
-            }
+        rocket::tokio::task::spawn_blocking(move || {
+            Handle::current().block_on(async move {
+                loop {
+                    BackgroundDataProvider::impl_foreground_fetch(
+                        sdk_key_store.get_registered_store().await,
+                        &shared_data_provider,
+                        batch_size,
+                    )
+                    .await;
+                    rocket::tokio::time::sleep(Duration::from_secs(polling_interval_in_s)).await;
+                }
+            });
         });
     }
 
     async fn impl_foreground_fetch(
-        store_iter: impl Iterator<Item = (AuthorizedRequestContext, u64)>,
+        store_iter: Vec<(Arc<AuthorizedRequestContext>, u64)>,
         data_provider: &Arc<HttpDataProvider>,
         update_batch_size: u64,
     ) {
@@ -117,42 +121,7 @@ impl BackgroundDataProvider {
 
             let data_provider = data_provider.clone();
             let join_handle = tokio::task::spawn(async move {
-                let dp_result = data_provider
-                    .get(&request_builder, &request_context, lcut)
-                    .await;
-                if dp_result.result == DataProviderRequestResult::DataAvailable {
-                    let data = dp_result
-                        .data
-                        .expect("If data is available, data must exist");
-
-                    if !request_context.use_lcut || lcut != data.1 {
-                        request_builder
-                            .get_observers()
-                            .notify_all(&dp_result.result, &request_context, data.1, &data.0)
-                            .await;
-                    }
-                } else if dp_result.result == DataProviderRequestResult::Error {
-                    if let Some(backup_data) = request_builder
-                        .get_backup_cache()
-                        .get(&request_context)
-                        .await
-                    {
-                        request_builder
-                            .get_observers()
-                            .notify_all(&dp_result.result, &request_context, lcut, &backup_data)
-                            .await;
-                    }
-                } else if dp_result.result == DataProviderRequestResult::Unauthorized {
-                    request_builder
-                        .get_observers()
-                        .notify_all(
-                            &dp_result.result,
-                            &request_context,
-                            lcut,
-                            &Arc::new("".to_string()),
-                        )
-                        .await;
-                }
+                Self::process_request(data_provider, request_builder, &request_context, lcut).await;
             });
 
             join_handles.push(join_handle);
@@ -161,5 +130,73 @@ impl BackgroundDataProvider {
             }
         }
         futures::future::join_all(join_handles).await;
+    }
+
+    async fn process_request(
+        data_provider: Arc<HttpDataProvider>,
+        request_builder: Arc<dyn RequestBuilderTrait>,
+        request_context: &Arc<AuthorizedRequestContext>,
+        lcut: u64,
+    ) {
+        let dp_result = data_provider
+            .get(&request_builder, request_context, lcut)
+            .await;
+
+        match dp_result.result {
+            DataProviderRequestResult::DataAvailable => {
+                if let Some(data) = dp_result.data {
+                    if !request_context.use_lcut || lcut != data.1 {
+                        Self::notify_observers(
+                            &request_builder,
+                            &dp_result.result,
+                            request_context,
+                            data.1,
+                            &data.0,
+                        )
+                        .await;
+                    }
+                }
+            }
+            DataProviderRequestResult::Error => {
+                if let Some(backup_data) = request_builder
+                    .get_backup_cache()
+                    .get(request_context)
+                    .await
+                {
+                    Self::notify_observers(
+                        &request_builder,
+                        &dp_result.result,
+                        request_context,
+                        lcut,
+                        &backup_data,
+                    )
+                    .await;
+                }
+            }
+            DataProviderRequestResult::Unauthorized => {
+                Self::notify_observers(
+                    &request_builder,
+                    &dp_result.result,
+                    request_context,
+                    lcut,
+                    &Arc::from(String::new()),
+                )
+                .await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn notify_observers(
+        request_builder: &Arc<dyn RequestBuilderTrait>,
+        result: &DataProviderRequestResult,
+        request_context: &Arc<AuthorizedRequestContext>,
+        lcut: u64,
+        data: &Arc<str>,
+    ) {
+        request_builder
+            .get_observers()
+            .notify_all(result, request_context, lcut, data)
+            .await;
     }
 }

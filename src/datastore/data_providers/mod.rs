@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::servers::http_server::AuthorizedRequestContext;
+use crate::servers::authorized_request_context::AuthorizedRequestContext;
 
 use self::request_builder::RequestBuilderTrait;
 #[async_trait]
@@ -13,7 +13,7 @@ pub trait DataProviderTrait {
     async fn get(
         &self,
         request_builder: &Arc<dyn RequestBuilderTrait>,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
     ) -> DataProviderResult;
 }
@@ -29,5 +29,5 @@ pub enum DataProviderRequestResult {
 #[derive(Debug)]
 pub struct DataProviderResult {
     result: DataProviderRequestResult,
-    data: Option<(Arc<String>, u64)>,
+    data: Option<(Arc<str>, u64)>,
 }

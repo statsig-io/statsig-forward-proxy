@@ -2,19 +2,18 @@ use super::data_providers::background_data_provider::{foreground_fetch, Backgrou
 use super::data_providers::DataProviderRequestResult;
 use super::sdk_key_store::SdkKeyStore;
 use crate::observers::HttpDataProviderObserverTrait;
-use crate::servers::http_server::AuthorizedRequestContext;
+use crate::servers::authorized_request_context::AuthorizedRequestContext;
 use dashmap::DashMap;
 
-use parking_lot::RwLock;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct IdlistForCompany {
-    pub idlists: Arc<String>,
+    pub idlists: Arc<str>,
 }
 
 pub struct GetIdListStore {
-    store: Arc<DashMap<AuthorizedRequestContext, Arc<RwLock<IdlistForCompany>>>>,
+    store: Arc<DashMap<Arc<AuthorizedRequestContext>, Arc<IdlistForCompany>>>,
     sdk_key_store: Arc<SdkKeyStore>,
     background_data_provider: Arc<BackgroundDataProvider>,
 }
@@ -29,28 +28,28 @@ impl HttpDataProviderObserverTrait for GetIdListStore {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         _lcut: u64,
-        data: &Arc<String>,
+        data: &Arc<str>,
     ) {
         if result == &DataProviderRequestResult::Error
             || result == &DataProviderRequestResult::DataAvailable
         {
             self.store.insert(
-                request_context.clone(),
-                Arc::new(RwLock::new(IdlistForCompany {
+                Arc::clone(request_context),
+                Arc::new(IdlistForCompany {
                     idlists: data.clone(),
-                })),
+                }),
             );
         } else if result == &DataProviderRequestResult::Unauthorized {
             self.store.remove(request_context);
         }
     }
 
-    async fn get(&self, request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
+    async fn get(&self, request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
         self.store
             .get(request_context)
-            .map(|record| record.read().idlists.clone())
+            .map(|record| record.idlists.clone())
     }
 }
 
@@ -68,18 +67,12 @@ impl GetIdListStore {
 
     pub async fn get_id_lists(
         &self,
-        request_context: &AuthorizedRequestContext,
-    ) -> Option<Arc<RwLock<IdlistForCompany>>> {
-        if !self.sdk_key_store.has_key(request_context).await {
+        request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<IdlistForCompany>> {
+        if !self.sdk_key_store.has_key(request_context) {
             // Since it's a cache-miss, just fill with a full payload
             // and check if we should return no update manually
-            foreground_fetch(
-                self.background_data_provider.clone(),
-                request_context,
-                0,
-                self.sdk_key_store.clone(),
-            )
-            .await;
+            foreground_fetch(self.background_data_provider.clone(), request_context, 0).await;
         }
 
         self.store.get(request_context).map(|r| r.clone())

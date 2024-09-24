@@ -3,7 +3,7 @@ use crate::datatypes::log_event::{
 };
 use crate::observers::proxy_event_observer::ProxyEventObserver;
 use crate::observers::{EventStat, OperationType, ProxyEvent, ProxyEventType};
-use crate::servers::http_server::AuthorizedRequestContext;
+use crate::servers::authorized_request_context::AuthorizedRequestContext;
 use chrono::{DateTime, Timelike, Utc};
 use futures::future::join_all;
 use std::hash::BuildHasher;
@@ -40,16 +40,13 @@ impl LogEventStore {
 
     pub async fn log_event(
         &self,
-        sdk_key: &str,
         mut data: LogEventRequest,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
     ) -> Result<String, Status> {
         let batch_in_size = data.events.len();
-        data.events = join_all(
-            data.events
-                .into_iter()
-                .map(|e| self.process_event(sdk_key, data.statsig_metadata.clone(), e)),
-        )
+        data.events = join_all(data.events.into_iter().map(|e| {
+            self.process_event(&request_context.sdk_key, data.statsig_metadata.clone(), e)
+        }))
         .await
         .into_iter()
         .flatten()
@@ -60,7 +57,7 @@ impl LogEventStore {
         let response = self
             .http_client
             .post(&self.url)
-            .header("statsig-api-key", sdk_key)
+            .header("statsig-api-key", &request_context.sdk_key)
             .header("statsig-event-count", batch_out_size)
             .body(data_string)
             .send()
@@ -71,8 +68,7 @@ impl LogEventStore {
                     operation_type: OperationType::IncrByValue,
                     value: (batch_in_size - batch_out_size) as i64,
                 }),
-        )
-        .await;
+        );
         match response {
             Ok(res) => res.text().await,
             Err(e) => Err(e),
@@ -97,8 +93,7 @@ impl LogEventStore {
                         value: 1,
                     },
                 ),
-            )
-            .await;
+            );
             lock.clear();
         }
         lock.insert(key)

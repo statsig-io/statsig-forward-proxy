@@ -5,7 +5,7 @@ trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
 export REDIS_TLS=false
 export REDIS_ENTERPRISE_HOST="localhost"
 export REDIS_ENTERPRISE_PORT=6379
-export STATSIG_ENDPOINT="https://api.statsigcdn.com"
+export STATSIG_ENDPOINT="http://0.0.0.0:8000"
 # export STATSD_SOCKET="/tmp/dsd.socket"
 # export DOGSTATSD_MAX_BUFFER_SIZE="1800"
 

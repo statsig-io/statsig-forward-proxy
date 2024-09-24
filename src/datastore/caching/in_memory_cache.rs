@@ -6,7 +6,7 @@ use crate::{
         proxy_event_observer::ProxyEventObserver, EventStat, HttpDataProviderObserverTrait,
         OperationType, ProxyEvent, ProxyEventType,
     },
-    servers::http_server::AuthorizedRequestContext,
+    servers::authorized_request_context::AuthorizedRequestContext,
 };
 
 use lru::LruCache;
@@ -37,9 +37,9 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
     async fn update(
         &self,
         result: &DataProviderRequestResult,
-        request_context: &AuthorizedRequestContext,
+        request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<String>,
+        data: &Arc<str>,
     ) {
         let storage_key = request_context.to_string();
         if result == &DataProviderRequestResult::DataAvailable {
@@ -62,8 +62,7 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
                             operation_type: OperationType::IncrByValue,
                             value: 1,
                         }),
-                    )
-                    .await;
+                    );
                 } else {
                     ProxyEventObserver::publish_event(
                         ProxyEvent::new_with_rc(
@@ -74,8 +73,7 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
                             operation_type: OperationType::IncrByValue,
                             value: 1,
                         }),
-                    )
-                    .await;
+                    );
                 }
             } else {
                 ProxyEventObserver::publish_event(
@@ -87,8 +85,7 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
                         operation_type: OperationType::IncrByValue,
                         value: 1,
                     }),
-                )
-                .await;
+                );
             }
         } else if result == &DataProviderRequestResult::Unauthorized {
             let contains_key = self.data.read().await.peek(&storage_key).is_some();
@@ -98,15 +95,14 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
         }
     }
 
-    async fn get(&self, request_context: &AuthorizedRequestContext) -> Option<Arc<String>> {
+    async fn get(&self, request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
         ProxyEventObserver::publish_event(
             ProxyEvent::new_with_rc(ProxyEventType::InMemoryCacheReadSucceed, request_context)
                 .with_stat(EventStat {
                     operation_type: OperationType::IncrByValue,
                     value: 1,
                 }),
-        )
-        .await;
+        );
 
         self.data
             .read()

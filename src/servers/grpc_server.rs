@@ -23,7 +23,8 @@ use tonic::metadata::MetadataValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::http_server::AuthorizedRequestContext;
+use super::authorized_request_context::AuthorizedRequestContextCache;
+use crate::servers::authorized_request_context::AuthorizedRequestContext;
 
 pub mod statsig_forward_proxy {
     tonic::include_proto!("statsig_forward_proxy");
@@ -32,7 +33,9 @@ pub mod statsig_forward_proxy {
 pub struct StatsigForwardProxyServerImpl {
     config_spec_store: Arc<datastore::config_spec_store::ConfigSpecStore>,
     dcs_observer: Arc<HttpDataProviderObserver>,
-    update_broadcast_cache: Arc<RwLock<HashMap<AuthorizedRequestContext, Arc<StreamingChannel>>>>,
+    update_broadcast_cache:
+        Arc<RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>>,
+    rc_cache: Arc<AuthorizedRequestContextCache>,
 }
 
 impl StatsigForwardProxyServerImpl {
@@ -40,13 +43,15 @@ impl StatsigForwardProxyServerImpl {
         config_spec_store: Arc<ConfigSpecStore>,
         dcs_observer: Arc<HttpDataProviderObserver>,
         update_broadcast_cache: Arc<
-            RwLock<HashMap<AuthorizedRequestContext, Arc<StreamingChannel>>>,
+            RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>,
         >,
+        rc_cache: Arc<AuthorizedRequestContextCache>,
     ) -> Self {
         StatsigForwardProxyServerImpl {
             config_spec_store,
             dcs_observer,
             update_broadcast_cache,
+            rc_cache,
         }
     }
 
@@ -70,8 +75,8 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         let data = match self
             .config_spec_store
             .get_config_spec(
-                &AuthorizedRequestContext::new(
-                    request.get_ref().sdk_key.clone(),
+                &self.rc_cache.get_or_insert(
+                    request.get_ref().sdk_key.to_string(),
                     format!(
                         "/v{}/download_config_specs/",
                         StatsigForwardProxyServerImpl::get_api_version_from_request(&request)
@@ -87,8 +92,8 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             }
         };
         let reply = ConfigSpecResponse {
-            spec: data.read().config.to_string(),
-            last_updated: data.read().lcut,
+            spec: data.config.to_string(),
+            last_updated: data.lcut,
         };
         Ok(Response::new(reply))
     }
@@ -100,10 +105,9 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
     ) -> Result<tonic::Response<Self::StreamConfigSpecStream>, tonic::Status> {
         let sdk_key = request.get_ref().sdk_key.to_string();
         let api_version = StatsigForwardProxyServerImpl::get_api_version_from_request(&request);
-        let request_context = AuthorizedRequestContext::new(
-            sdk_key.clone(),
-            format!("/v{}/download_config_specs/", api_version),
-        );
+        let request_context = self
+            .rc_cache
+            .get_or_insert(sdk_key, format!("/v{}/download_config_specs/", api_version));
 
         let (tx, rx) = mpsc::channel(1);
         // Get initial DCS on first request
@@ -129,14 +133,14 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                 .await
                 .subscribe(),
             false => {
-                let sc = Arc::new(StreamingChannel::new(&request_context));
+                let sc = Arc::new(StreamingChannel::new(Arc::clone(&request_context)));
                 let streaming_channel_trait: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> =
                     sc.clone();
                 self.dcs_observer
                     .add_observer(streaming_channel_trait)
                     .await;
                 let rv = sc.sender.read().await.subscribe();
-                wlock.insert(request_context.clone(), sc);
+                wlock.insert(Arc::clone(&request_context), sc);
                 rv
             }
         };
@@ -144,7 +148,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
 
         // After initial response, then start listening for updates
         let ubc_ref = Arc::clone(&self.update_broadcast_cache);
-        tokio::spawn(async move {
+        rocket::tokio::spawn(async move {
             tx.send(Ok(init_value)).await.ok();
             ProxyEventObserver::publish_event(
                 ProxyEvent::new_with_rc(
@@ -155,8 +159,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                     operation_type: OperationType::IncrByValue,
                     value: 1,
                 }),
-            )
-            .await;
+            );
 
             loop {
                 match rc.recv().await {
@@ -172,8 +175,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                                         operation_type: OperationType::IncrByValue,
                                         value: 1,
                                     }),
-                                )
-                                .await;
+                                );
                             }
                             Err(_e) => {
                                 break;
@@ -207,8 +209,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                     operation_type: OperationType::IncrByValue,
                     value: 1,
                 }),
-            )
-            .await;
+            );
         });
 
         let mut response = Response::new(ReceiverStream::new(rx));
@@ -226,7 +227,7 @@ pub struct GrpcServer {}
 impl GrpcServer {
     async fn shutdown_signal(
         update_broadcast_cache: Arc<
-            RwLock<HashMap<AuthorizedRequestContext, Arc<StreamingChannel>>>,
+            RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>,
         >,
     ) {
         let mut int_stream =
@@ -256,6 +257,7 @@ impl GrpcServer {
         max_concurrent_streams: u32,
         config_spec_store: Arc<ConfigSpecStore>,
         shared_dcs_observer: Arc<HttpDataProviderObserver>,
+        rc_cache: Arc<AuthorizedRequestContextCache>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let addr = "0.0.0.0:50051".parse().unwrap();
         let update_broadcast_cache = Arc::new(RwLock::new(HashMap::new()));
@@ -263,6 +265,7 @@ impl GrpcServer {
             config_spec_store,
             shared_dcs_observer,
             update_broadcast_cache.clone(),
+            rc_cache,
         );
 
         println!("GrpcServer listening on {}", addr);
