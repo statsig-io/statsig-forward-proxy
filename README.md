@@ -55,6 +55,7 @@ Additional logging parameters we support:
                  It will also emit useful data such as latency for some events.
 --statsd-logging: This will emit the same metrics and events using statsd.
 --datadog-logging: Same as statsd logging, but uses distribution metrics instead of timing
+--statsig-logging: Use statsig to monitor the same performance metrics
 --force_gcp_profiling_enabled: Enable gcp cloud profiler by force.
 --clear-external-datastore-on-unauthorized: When a 401/403 is received, clear external caches (such as redis). Noting that this is a potential reliability trade off.
 ```
