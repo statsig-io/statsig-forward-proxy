@@ -21,11 +21,12 @@ Usage: server [OPTIONS] <MODE> <CACHE>
 
 Arguments:
   <MODE>   [possible values: grpc-and-http, grpc, http]
-  <CACHE>  [possible values: local, redis]
+  <CACHE>  [possible values: disabled, local, redis]
 
 Options:
-      --statsd-logging
       --datadog-logging
+      --statsd-logging
+      --statsig-logging
       --debug-logging
   -m, --maximum-concurrent-sdk-keys <MAXIMUM_CONCURRENT_SDK_KEYS>  [default: 1000]
   -p, --polling-interval-in-s <POLLING_INTERVAL_IN_S>              [default: 10]
@@ -35,13 +36,18 @@ Options:
       --force-gcp-profiling-enabled
   -g, --grpc-max-concurrent-streams <GRPC_MAX_CONCURRENT_STREAMS>  [default: 500]
       --clear-external-datastore-on-unauthorized
+      --x509-server-cert-path <X509_SERVER_CERT_PATH>
+      --x509-server-key-path <X509_SERVER_KEY_PATH>
+      --x509-client-cert-path <X509_CLIENT_CERT_PATH>
   -h, --help                                                       Print help
-  -V, --version                                                    Print version
+  -V, --version
 ```
 1. MODE:  This can be configured as grpc or http or grpc-and-http to allow for easy migrations.
-2. CACHE: local uses in process memory to cache backup values, while redis, will use redis. Redis
-          will store the config in a single key entry that ends up being "statsig::{sha256(sdk_key)}".
-          This allows you read the value back from the SDK data adapter if needed.
+2. CACHE: This is for the backup cache. Local uses in process memory to cache backup values, while redis,
+          will use redis. Redis will store the config in a single key entry that ends up being "statsig::{sha256(sdk_key)}".
+          This allows you read the value back from the SDK data adapter if needed. We recommend using
+          redis or disabled. Local was primarily designed for testing and not to be used in production
+          as it is an exact duplicate of the datastores that are also stored in memory.
 
 Additional logging parameters we support:
 ```
