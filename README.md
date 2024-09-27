@@ -53,6 +53,7 @@ Additional logging parameters we support:
 ```
 --debug-logging: This enables state tracking logging that is emitted for various events within the proxy.
                  It will also emit useful data such as latency for some events.
+--statsig-logging: Send events to Statsig to monitor performance and behaviour of proxy.
 --statsd-logging: This will emit the same metrics and events using statsd.
 --datadog-logging: Same as statsd logging, but uses distribution metrics instead of timing
 --force_gcp_profiling_enabled: Enable gcp cloud profiler by force.
