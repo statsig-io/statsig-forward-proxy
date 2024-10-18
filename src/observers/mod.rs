@@ -48,8 +48,6 @@ pub enum ProxyEventType {
     InMemoryCacheWriteSucceed,
     InMemoryCacheWriteSkipped,
     InMemoryCacheReadSucceed,
-    SdkKeyStoreCacheMiss,
-    SdkKeyStoreCacheHit,
     ConfigSpecStoreGotData,
     ConfigSpecStoreGotNoData,
     GrpcStreamingStreamedInitialized,
@@ -83,10 +81,7 @@ impl std::fmt::Display for ProxyEventType {
             ProxyEventType::InMemoryCacheWriteSucceed => write!(f, "InMemoryCacheWriteSucceed"),
             ProxyEventType::InMemoryCacheWriteSkipped => write!(f, "InMemoryCacheWriteSkipped"),
             ProxyEventType::InMemoryCacheReadSucceed => write!(f, "InMemoryCacheReadSucceed"),
-            ProxyEventType::SdkKeyStoreCacheMiss => write!(f, "SdkKeyStoreCacheMiss"),
-            ProxyEventType::SdkKeyStoreCacheHit => write!(f, "SdkKeyStoreCacheHit"),
             ProxyEventType::ConfigSpecStoreGotData => write!(f, "ConfigSpecStoreGotData"),
-            ProxyEventType::ConfigSpecStoreGotNoData => write!(f, "ConfigSpecStoreGotNoData"),
             ProxyEventType::GrpcStreamingStreamedInitialized => {
                 write!(f, "GrpcStreamingStreamedInitialized")
             }

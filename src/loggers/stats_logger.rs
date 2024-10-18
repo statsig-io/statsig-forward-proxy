@@ -22,16 +22,12 @@ use smallvec::SmallVec;
 
 #[derive(Deserialize, Clone)]
 pub struct EnvConfig {
-    pub datadog_sampling_rate: Option<u64>,
     pub datadog_max_batch_time_ms: Option<u64>,
     pub datadog_max_batch_event_count: Option<usize>,
-    pub datadog_max_backoff_ms: Option<u64>,
     pub dogstatsd_max_buffer_size: Option<usize>,
     pub dogstatsd_max_time_ms: Option<u64>,
     pub dogstatsd_max_retry_attempt: Option<usize>,
     pub dogstatsd_initial_retry_delay: Option<u64>,
-    pub dogstatsd_client_initialization_retry_delay: Option<u64>,
-    pub dogstatsd_client_initialization_max_retry_attempt: Option<usize>,
     pub statsd_host_override: Option<String>,
     pub statsd_port_override: Option<String>,
     pub statsd_socket: Option<String>,

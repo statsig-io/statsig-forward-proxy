@@ -349,7 +349,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(0)
         .build()
         .expect("We must have an http client");
     let log_event_store = create_log_event_store(http_client.clone(), &overrides).await;
