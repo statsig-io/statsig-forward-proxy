@@ -78,6 +78,10 @@ We recommend two main modes of deploying the statsig forward proxy:
 
 <img width="636" alt="Screenshot 2024-04-03 at 7 26 56 PM" src="https://github.com/statsig-io/statsig-forward-proxy/assets/111610731/6f24c712-1423-4cb7-af07-aaeaf0f0d91f">
 
+# Monitoring
+
+See documentation [here](https://github.com/statsig-io/statsig-forward-proxy/blob/main/docs/monitoring.md) for how to monitor and understand metrics.
+
 # Architecture
 
 The software architecture is designed as follows:
