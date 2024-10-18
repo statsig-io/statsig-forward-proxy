@@ -1,6 +1,7 @@
 use crate::{
     datastore::{
-        config_spec_store::ConfigSpecForCompany, data_providers::DataProviderRequestResult,
+        config_spec_store::ConfigSpecForCompany,
+        data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
     },
     observers::{
         proxy_event_observer::ProxyEventObserver, EventStat, HttpDataProviderObserverTrait,
@@ -39,7 +40,7 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
         result: &DataProviderRequestResult,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<str>,
+        data: &Arc<ResponsePayload>,
     ) {
         let storage_key = request_context.to_string();
         if result == &DataProviderRequestResult::DataAvailable {
@@ -95,7 +96,10 @@ impl HttpDataProviderObserverTrait for InMemoryCache {
         }
     }
 
-    async fn get(&self, request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
+    async fn get(
+        &self,
+        request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<ResponsePayload>> {
         ProxyEventObserver::publish_event(
             ProxyEvent::new_with_rc(ProxyEventType::InMemoryCacheReadSucceed, request_context)
                 .with_stat(EventStat {

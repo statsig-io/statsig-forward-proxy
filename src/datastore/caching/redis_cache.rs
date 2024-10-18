@@ -1,11 +1,15 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    io::{Cursor, Read, Write},
+    sync::Arc,
+};
 
 use bb8_redis::{redis::AsyncCommands, RedisConnectionManager};
 use parking_lot::RwLock;
 use redis::aio::MultiplexedConnection;
 
 use crate::{
-    datastore::data_providers::DataProviderRequestResult,
+    datastore::data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
     observers::{
         proxy_event_observer::ProxyEventObserver, HttpDataProviderObserverTrait, ProxyEvent,
         ProxyEventType,
@@ -17,6 +21,8 @@ use crate::observers::EventStat;
 use crate::observers::OperationType;
 
 use bb8_redis::redis::RedisError;
+use bytes::Bytes;
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -122,20 +128,21 @@ impl HttpDataProviderObserverTrait for RedisCache {
         result: &DataProviderRequestResult,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<str>,
+        data: &Arc<ResponsePayload>,
     ) {
+        // TODO: This will be a problem if we start using DCS v2 with the forward
+        //       proxy because the redis data adapter currently has no way
+        //       to differentiate between the DCS v1 and DCS v2.
+        //
+        //       So for now, to keep functionality, continue using just
+        //       the sdk key.
+        let redis_key = self.hash_key(&request_context.sdk_key).await;
+
         if result == &DataProviderRequestResult::DataAvailable {
             let connection: Result<
                 bb8::PooledConnection<RedisConnectionManager>,
                 bb8::RunError<RedisError>,
             > = self.connection.get().await;
-            // TODO: This will be a problem if we start using DCS v2 with the forward
-            //       proxy because the redis data adapter currently has no way
-            //       to differentiate between the DCS v1 and DCS v2.
-            //
-            //       So for now, to keep functionality, continue using just
-            //       the sdk key.
-            let redis_key = self.hash_key(&request_context.sdk_key).await;
             match connection {
                 Ok(mut conn) => {
                     let mut pipe = redis::pipe();
@@ -178,9 +185,38 @@ impl HttpDataProviderObserverTrait for RedisCache {
                     };
 
                     if should_update {
+                        let data_to_write = match request_context.use_gzip
+                            && data.encoding.as_deref() == Some("gzip")
+                        {
+                            true => {
+                                let mut decoder = GzDecoder::new(Cursor::new(&**data.data));
+                                let mut decompressed = Vec::new();
+                                match decoder.read_to_end(&mut decompressed) {
+                                    Ok(_) => decompressed,
+                                    Err(e) => {
+                                        ProxyEventObserver::publish_event(
+                                            ProxyEvent::new_with_rc(
+                                                ProxyEventType::RedisCacheWriteFailed,
+                                                request_context,
+                                            )
+                                            .with_stat(EventStat {
+                                                operation_type: OperationType::IncrByValue,
+                                                value: 1,
+                                            }),
+                                        );
+                                        eprintln!("Failed to decode gzipped data before writing to redis: {:?}", e);
+                                        return;
+                                    }
+                                }
+                            }
+                            false => data.data.to_vec(),
+                        };
+
+                        // We currently only support writing data to redis as plain_text
                         match pipe
+                            .hset(&redis_key, "encoding", "plain_text")
                             .hset(&redis_key, "lcut", lcut)
-                            .hset(&redis_key, "config", data.to_string())
+                            .hset(&redis_key, "config", data_to_write)
                             .expire(&redis_key, self.redis_cache_ttl_in_s)
                             .expire(REDIS_LEADER_KEY, self.leader_key_ttl)
                             .query_async::<MultiplexedConnection, ()>(&mut *conn)
@@ -246,7 +282,6 @@ impl HttpDataProviderObserverTrait for RedisCache {
             && self.clear_external_datastore_on_unauthorized
         {
             let connection = self.connection.get().await;
-            let redis_key = self.hash_key(&request_context.to_string()).await;
             match connection {
                 Ok(mut conn) => match conn.del(&redis_key).await {
                     Ok(()) => {
@@ -295,16 +330,24 @@ impl HttpDataProviderObserverTrait for RedisCache {
         }
     }
 
-    async fn get(&self, request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
+    async fn get(
+        &self,
+        request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<ResponsePayload>> {
         let connection = self.connection.get().await;
+        let redis_key = self.hash_key(&request_context.sdk_key).await;
         match connection {
             Ok(mut conn) => {
-                let res: Result<Vec<String>, RedisError> = conn
-                    .hget(self.hash_key(&request_context.to_string()).await, "config")
+                let mut pipe = redis::pipe();
+                let res = pipe
+                    .hget(redis_key.clone(), "encoding")
+                    .hget(redis_key, "config")
+                    .query_async::<MultiplexedConnection, (Option<String>, Vec<u8>)>(&mut *conn)
                     .await;
+
                 match res {
-                    Ok(data) => {
-                        if data.is_empty() {
+                    Ok(payload) => {
+                        if payload.1.is_empty() {
                             ProxyEventObserver::publish_event(
                                 ProxyEvent::new_with_rc(
                                     ProxyEventType::RedisCacheReadMiss,
@@ -327,7 +370,32 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                     value: 1,
                                 }),
                             );
-                            Some(Arc::from(data.first().expect("Must have data").to_owned()))
+
+                            match request_context.use_gzip
+                                && payload.0.is_some_and(|encoding| encoding == "plain_text")
+                            {
+                                true => {
+                                    let mut compressed = Vec::new();
+                                    let mut encoder =
+                                        GzEncoder::new(&mut compressed, Compression::best());
+                                    if let Err(e) = encoder.write_all(&payload.1) {
+                                        eprintln!("Failed to gzip data from redis: {:?}", e);
+                                        return None;
+                                    }
+                                    if let Err(e) = encoder.finish() {
+                                        eprintln!("Failed to gzip data from redis: {:?}", e);
+                                        return None;
+                                    }
+                                    Some(Arc::new(ResponsePayload {
+                                        encoding: Arc::new(Some("gzip".to_string())),
+                                        data: Arc::new(Bytes::from(compressed)),
+                                    }))
+                                }
+                                false => Some(Arc::new(ResponsePayload {
+                                    encoding: Arc::new(None),
+                                    data: Arc::new(Bytes::from(payload.1)),
+                                })),
+                            }
                         }
                     }
                     Err(e) => {

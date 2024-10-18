@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    datastore::data_providers::DataProviderRequestResult,
+    datastore::data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
     servers::authorized_request_context::AuthorizedRequestContext,
 };
 
@@ -38,7 +38,7 @@ impl HttpDataProviderObserver {
         result: &DataProviderRequestResult,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<str>,
+        data: &Arc<ResponsePayload>,
     ) {
         let (async_observers, sync_observers): (Vec<_>, Vec<_>) = {
             let observers = self.observers.read().await;

@@ -1,3 +1,7 @@
 [global]
 address = "0.0.0.0"
 limits = { json = "5 MiB", string = "5 MiB" }
+log_level = "critical"
+workers = 128
+keep_alive=15
+ident="statsig-forward-proxy"

@@ -6,21 +6,20 @@ use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{proxy_event_observer::ProxyEventObserver, ProxyEvent, ProxyEventType};
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
+use bytes::Bytes;
 use reqwest::header::HeaderMap;
+
+#[derive(Debug)]
+pub struct ResponsePayload {
+    pub encoding: Arc<Option<String>>,
+    pub data: Arc<Bytes>,
+}
 
 pub trait DataProviderObserver {
     fn update(&self, key: &str, data: &str);
 }
 
-pub struct HttpDataProvider {
-    http_client: reqwest::Client,
-}
-
-impl HttpDataProvider {
-    pub fn new(http_client: reqwest::Client) -> Self {
-        HttpDataProvider { http_client }
-    }
-}
+pub struct HttpDataProvider {}
 
 use async_trait::async_trait;
 
@@ -29,6 +28,7 @@ use tokio::time::Instant;
 impl DataProviderTrait for HttpDataProvider {
     async fn get(
         &self,
+        http_client: &reqwest::Client,
         request_builder: &Arc<dyn RequestBuilderTrait>,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
@@ -36,7 +36,7 @@ impl DataProviderTrait for HttpDataProvider {
         let start_time = Instant::now();
 
         let response = match request_builder
-            .make_request(&self.http_client, request_context, lcut)
+            .make_request(http_client, request_context, lcut)
             .await
         {
             Ok(response) => response,
@@ -50,8 +50,8 @@ impl DataProviderTrait for HttpDataProvider {
         let status = response.status();
         let headers = response.headers().clone();
 
-        let body = match response.bytes().await {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        let (body, bytes) = match response.bytes().await {
+            Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), bytes),
             Err(err) => {
                 return self
                     .handle_error(err.to_string(), start_time, request_context, lcut)
@@ -69,16 +69,26 @@ impl DataProviderTrait for HttpDataProvider {
             .is_an_update(&body, &request_context.sdk_key)
             .await
         {
-            return self
-                .handle_no_data(body, lcut, start_time, request_context)
-                .await;
+            return self.handle_no_data(lcut, start_time, request_context).await;
         }
 
         let since_time = self
             .parse_since_time(&headers, lcut, start_time, request_context)
             .await;
-        self.handle_success(body, since_time, start_time, request_context)
-            .await
+        let content_encoding =
+            headers
+                .get("content-encoding")
+                .and_then(|value| match value.to_str() {
+                    Ok(encoding) => Some(encoding.to_string()),
+                    Err(_e) => None,
+                });
+        self.handle_success(
+            (content_encoding, bytes),
+            since_time,
+            start_time,
+            request_context,
+        )
+        .await
     }
 }
 
@@ -115,7 +125,6 @@ impl HttpDataProvider {
 
     async fn handle_no_data(
         &self,
-        body: String,
         lcut: u64,
         start_time: Instant,
         request_context: &Arc<AuthorizedRequestContext>,
@@ -134,7 +143,7 @@ impl HttpDataProvider {
 
         DataProviderResult {
             result: DataProviderRequestResult::NoDataAvailable,
-            data: Some((Arc::from(body), lcut)),
+            data: None,
         }
     }
 
@@ -171,7 +180,7 @@ impl HttpDataProvider {
 
     async fn handle_success(
         &self,
-        body: String,
+        result: (Option<String>, Bytes),
         since_time: u64,
         start_time: Instant,
         request_context: &Arc<AuthorizedRequestContext>,
@@ -190,7 +199,13 @@ impl HttpDataProvider {
 
         DataProviderResult {
             result: DataProviderRequestResult::DataAvailable,
-            data: Some((Arc::from(body), since_time)),
+            data: Some((
+                Arc::new(ResponsePayload {
+                    encoding: Arc::from(result.0),
+                    data: Arc::from(result.1),
+                }),
+                since_time,
+            )),
         }
     }
 }
