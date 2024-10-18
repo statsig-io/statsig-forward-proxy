@@ -49,7 +49,6 @@ pub enum ProxyEventType {
     InMemoryCacheWriteSkipped,
     InMemoryCacheReadSucceed,
     ConfigSpecStoreGotData,
-    ConfigSpecStoreGotNoData,
     GrpcStreamingStreamedInitialized,
     GrpcStreamingStreamedResponse,
     GrpcStreamingStreamDisconnected,
