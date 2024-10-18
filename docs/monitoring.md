@@ -1,10 +1,20 @@
 # Monitoring
 
+# Table of Contents
+1. [Existing Options](https://github.com/statsig-io/statsig-forward-proxy/blob/main/docs/monitoring.md#existing-options)
+1. [Configuration](https://github.com/statsig-io/statsig-forward-proxy/blob/main/docs/monitoring.md#configuration)
+1. [Types of Events](https://github.com/statsig-io/statsig-forward-proxy/blob/main/docs/monitoring.md#types-of-events-emitted)
+1. [Common Issues and Questions](https://github.com/statsig-io/statsig-forward-proxy/blob/main/docs/monitoring.md#common-issues-and-questions)
+
+## Existing Options
+
 The forward proxy comes pre-built with a few different options for monitoring:
 1. **--debug-logging**: With no additional configuration, we will output event information to stdout. This is best used for debugging and assisting while deployment for quick understanding of functionality. This is not recommended for prod.
 1. **--statsig-logging**: With configuration, send your metrics to Statsig and monitor through our dashboards and metric explorer capabilities.
 1. **--statsd-logging**: With configuration, utilize the [open standard](https://github.com/statsd/statsd/blob/master/docs/metric_types.md) to emit metrics to a UDS or UDP socket.
 1. **--datadog-logging**: Same as statsd, except replaces the timing metric with datadog's proprietary distribution metric.
+
+If you'd like support for anything else, feel free to submit an issue or post in our slack channel.
 
 ## Configuration
 
