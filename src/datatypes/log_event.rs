@@ -84,4 +84,5 @@ pub struct LogEventRequest {
 #[derive(Serialize, Deserialize)]
 pub struct LogEventResponse {
     pub success: bool,
+    pub message: Option<String>,
 }

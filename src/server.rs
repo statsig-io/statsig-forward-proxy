@@ -1,3 +1,4 @@
+use clap::ArgAction;
 use clap::Parser;
 use clap::ValueEnum;
 
@@ -18,6 +19,7 @@ use futures::join;
 use loggers::debug_logger;
 use loggers::stats_logger;
 use observers::http_data_provider_observer::HttpDataProviderObserver;
+use tokio_util::sync::CancellationToken;
 
 use servers::authorized_request_context::AuthorizedRequestContextCache;
 use statsig::{Statsig, StatsigOptions};
@@ -25,7 +27,11 @@ use statsig::{Statsig, StatsigOptions};
 use observers::proxy_event_observer::ProxyEventObserver;
 use observers::HttpDataProviderObserverTrait;
 use std::sync::Arc;
+use std::time::Duration;
+
 use uuid::Uuid;
+
+use lazy_static::lazy_static;
 
 pub mod datastore;
 pub mod datatypes;
@@ -35,9 +41,13 @@ pub mod servers;
 pub mod utils;
 use serde::Deserialize;
 
-#[derive(Parser)]
+lazy_static! {
+    pub static ref GRACEFUL_SHUTDOWN_TOKEN: CancellationToken = CancellationToken::new();
+}
+
+#[derive(Parser, Clone)]
 #[command(version, about, long_about = None)]
-struct Cli {
+pub struct Cli {
     #[arg(value_enum)]
     mode: TransportMode,
     #[arg(value_enum)]
@@ -61,6 +71,8 @@ struct Cli {
     redis_leader_key_ttl: i64,
     #[clap(long, default_value = "86400")]
     redis_cache_ttl_in_s: i64,
+    #[clap(long, default_value = "20000")]
+    log_event_process_queue_size: usize,
     #[clap(long, action)]
     force_gcp_profiling_enabled: bool,
     #[clap(short, long, default_value = "500")]
@@ -71,6 +83,18 @@ struct Cli {
     // inavailability of the config.
     #[clap(long, action)]
     clear_external_datastore_on_unauthorized: bool,
+
+    // Authorization and TLS Configuration:
+    #[clap(long, default_value = None)]
+    x509_server_cert_path: Option<String>,
+    #[clap(long, default_value = None)]
+    x509_server_key_path: Option<String>,
+    #[clap(long, default_value = None)]
+    x509_client_cert_path: Option<String>,
+    #[clap(long, action = ArgAction::Set, default_value = "true")]
+    enforce_tls: bool,
+    #[clap(long, default_value = "false")]
+    enforce_mtls: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -158,6 +182,7 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
 }
 
 async fn create_config_spec_store(
+    _cli: &Cli,
     overrides: &ConfigurationAndOverrides,
     background_data_provider: Arc<background_data_provider::BackgroundDataProvider>,
     config_spec_observer: Arc<HttpDataProviderObserver>,
@@ -221,14 +246,16 @@ async fn create_log_event_store(
     http_client: reqwest::Client,
     config: &ConfigurationAndOverrides,
 ) -> Arc<LogEventStore> {
-    Arc::new(LogEventStore::new(
+    let store = Arc::new(LogEventStore::new(
         config
             .log_event_statsig_endpoint
             .as_ref()
             .map_or("https://statsigapi.net", |s| s.as_str()),
         http_client,
         config.log_event_dedupe_cache_limit.unwrap_or(2_000_000),
-    ))
+    ));
+
+    store.clone()
 }
 
 #[rocket::main]
@@ -252,13 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let debug_logger = Arc::new(debug_logger::DebugLogger::new());
         ProxyEventObserver::add_observer(debug_logger).await;
     }
-    let http_client = reqwest::Client::builder()
-        .pool_idle_timeout(None)
-        .build()
-        .expect("We must have an http client");
-    let shared_http_data_provider = Arc::new(http_data_provider::HttpDataProvider::new(
-        http_client.clone(),
-    ));
+    let shared_http_data_provider = Arc::new(http_data_provider::HttpDataProvider {});
     let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
     let background_data_provider = Arc::new(background_data_provider::BackgroundDataProvider::new(
         shared_http_data_provider,
@@ -267,7 +288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&sdk_key_store),
     ));
     let cache_uuid = Uuid::new_v4().to_string();
-    let shared_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
+    let config_spec_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
         CacheMode::Local => Arc::new(in_memory_cache::InMemoryCache::new(
             cli.maximum_concurrent_sdk_keys,
         )),
@@ -284,13 +305,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         CacheMode::Disabled => Arc::new(disabled_cache::DisabledCache::default()),
     };
+    let id_list_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
+        CacheMode::Local => Arc::new(in_memory_cache::InMemoryCache::new(
+            cli.maximum_concurrent_sdk_keys,
+        )),
+        CacheMode::Redis => Arc::new(
+            redis_cache::RedisCache::new(
+                "statsig_id_list".to_string(),
+                cli.redis_leader_key_ttl,
+                &cache_uuid,
+                false, /* check lcut */
+                cli.clear_external_datastore_on_unauthorized,
+                cli.redis_cache_ttl_in_s,
+            )
+            .await,
+        ),
+        CacheMode::Disabled => Arc::new(disabled_cache::DisabledCache::default()),
+    };
 
     let config_spec_observer = Arc::new(HttpDataProviderObserver::new());
     let config_spec_store = create_config_spec_store(
+        &cli,
         &overrides,
         Arc::clone(&background_data_provider),
         Arc::clone(&config_spec_observer),
-        &shared_cache,
+        &config_spec_cache,
         &sdk_key_store,
     )
     .await;
@@ -299,18 +338,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &overrides,
         Arc::clone(&background_data_provider),
         Arc::clone(&idlist_observer),
-        &shared_cache,
+        &id_list_cache,
         &sdk_key_store,
     )
     .await;
-    let log_event_store = create_log_event_store(http_client.clone(), &overrides).await;
     background_data_provider.start_background_thread().await;
     let rc_cache = Arc::new(AuthorizedRequestContextCache::new());
-
+    // Default buffer size is 20000 messages
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("We must have an http client");
+    let log_event_store = create_log_event_store(http_client.clone(), &overrides).await;
     match cli.mode {
         TransportMode::Grpc => {
             servers::grpc_server::GrpcServer::start_server(
-                cli.grpc_max_concurrent_streams,
+                &cli,
                 config_spec_store,
                 config_spec_observer,
                 rc_cache,
@@ -319,6 +365,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         TransportMode::Http => {
             servers::http_server::HttpServer::start_server(
+                &cli,
                 config_spec_store,
                 id_list_store,
                 log_event_store,
@@ -328,12 +375,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         TransportMode::GrpcAndHttp => {
             let grpc_server = servers::grpc_server::GrpcServer::start_server(
-                cli.grpc_max_concurrent_streams,
+                &cli,
                 config_spec_store.clone(),
                 config_spec_observer.clone(),
                 rc_cache.clone(),
             );
             let http_server = servers::http_server::HttpServer::start_server(
+                &cli,
                 config_spec_store,
                 id_list_store,
                 log_event_store,
@@ -344,5 +392,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },);
         }
     }
+
+    // Terminate all actively running loops in other threads
+    GRACEFUL_SHUTDOWN_TOKEN.cancel();
+
     Ok(())
 }

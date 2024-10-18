@@ -1,6 +1,8 @@
+use std::fs;
 use tokio::sync::{mpsc, RwLock};
 
 use tokio_stream::wrappers::ReceiverStream;
+
 use tonic::{transport::Server, Request, Response, Status};
 
 use crate::datastore::config_spec_store::ConfigSpecStore;
@@ -12,6 +14,7 @@ use crate::observers::OperationType;
 use crate::observers::{EventStat, HttpDataProviderObserverTrait};
 use crate::observers::{ProxyEvent, ProxyEventType};
 use crate::servers::streaming_channel::StreamingChannel;
+use crate::Cli;
 use statsig_forward_proxy::statsig_forward_proxy_server::{
     StatsigForwardProxy, StatsigForwardProxyServer,
 };
@@ -30,6 +33,7 @@ pub mod statsig_forward_proxy {
     tonic::include_proto!("statsig_forward_proxy");
 }
 
+#[derive(Clone)]
 pub struct StatsigForwardProxyServerImpl {
     config_spec_store: Arc<datastore::config_spec_store::ConfigSpecStore>,
     dcs_observer: Arc<HttpDataProviderObserver>,
@@ -64,6 +68,14 @@ impl StatsigForwardProxyServerImpl {
 
         version_number
     }
+
+    fn add_common_metadata<T>(&self, response: &mut Response<T>) {
+        response.metadata_mut().insert(
+            "x-sfp-hostname",
+            MetadataValue::from_str(&env::var("HOSTNAME").unwrap_or("no_hostname_set".to_string()))
+                .unwrap(),
+        );
+    }
 }
 
 #[tonic::async_trait]
@@ -81,6 +93,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                         "/v{}/download_config_specs/",
                         StatsigForwardProxyServerImpl::get_api_version_from_request(&request)
                     ),
+                    false, /* use_gzip */
                 ),
                 request.get_ref().since_time.unwrap_or(0),
             )
@@ -92,10 +105,13 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             }
         };
         let reply = ConfigSpecResponse {
-            spec: data.config.to_string(),
+            spec: unsafe { String::from_utf8_unchecked(data.config.data.to_vec()) },
             last_updated: data.lcut,
         };
-        Ok(Response::new(reply))
+
+        let mut response = Response::new(reply);
+        self.add_common_metadata(&mut response);
+        Ok(response)
     }
 
     type StreamConfigSpecStream = ReceiverStream<Result<ConfigSpecResponse, Status>>;
@@ -105,9 +121,11 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
     ) -> Result<tonic::Response<Self::StreamConfigSpecStream>, tonic::Status> {
         let sdk_key = request.get_ref().sdk_key.to_string();
         let api_version = StatsigForwardProxyServerImpl::get_api_version_from_request(&request);
-        let request_context = self
-            .rc_cache
-            .get_or_insert(sdk_key, format!("/v{}/download_config_specs/", api_version));
+        let request_context = self.rc_cache.get_or_insert(
+            sdk_key,
+            format!("/v{}/download_config_specs/", api_version,),
+            false, /* use_gzip */
+        );
 
         let (tx, rx) = mpsc::channel(1);
         // Get initial DCS on first request
@@ -164,7 +182,13 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             loop {
                 match rc.recv().await {
                     Ok(maybe_csr) => match maybe_csr {
-                        Some(csr) => match tx.send(Ok(csr)).await {
+                        Some((data, lcut)) => match tx
+                            .send(Ok(ConfigSpecResponse {
+                                spec: unsafe { String::from_utf8_unchecked(data.data.to_vec()) },
+                                last_updated: lcut,
+                            }))
+                            .await
+                        {
                             Ok(_) => {
                                 ProxyEventObserver::publish_event(
                                     ProxyEvent::new_with_rc(
@@ -213,11 +237,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         });
 
         let mut response = Response::new(ReceiverStream::new(rx));
-        response.metadata_mut().insert(
-            "x-sfp-hostname",
-            MetadataValue::from_str(&env::var("HOSTNAME").unwrap_or("no_hostname_set".to_string()))
-                .unwrap(),
-        );
+        self.add_common_metadata(&mut response);
         Ok(response)
     }
 }
@@ -254,12 +274,13 @@ impl GrpcServer {
     }
 
     pub async fn start_server(
-        max_concurrent_streams: u32,
+        cli: &Cli,
         config_spec_store: Arc<ConfigSpecStore>,
         shared_dcs_observer: Arc<HttpDataProviderObserver>,
         rc_cache: Arc<AuthorizedRequestContextCache>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let addr = "0.0.0.0:50051".parse().unwrap();
+        let http_addr = "0.0.0.0:50051".parse().unwrap();
+        let https_addr = "0.0.0.0:50052".parse().unwrap();
         let update_broadcast_cache = Arc::new(RwLock::new(HashMap::new()));
         let sfp_server = StatsigForwardProxyServerImpl::new(
             config_spec_store,
@@ -268,13 +289,106 @@ impl GrpcServer {
             rc_cache,
         );
 
-        println!("GrpcServer listening on {}", addr);
-        Server::builder()
-            .max_concurrent_streams(max_concurrent_streams)
-            .add_service(StatsigForwardProxyServer::new(sfp_server))
+        match (
+            cli.x509_server_cert_path.is_some() && cli.x509_server_key_path.is_some(),
+            cli.enforce_tls,
+        ) {
+            (false, _) => {
+                println!("GrpcServer listening on {} (HTTP)", http_addr);
+                Self::create_http_server(sfp_server, http_addr, update_broadcast_cache.clone())
+                    .await?
+            }
+            (true, true) => {
+                println!("GrpcServer listening on {} (HTTPS)", http_addr);
+                Self::create_https_server(
+                    cli,
+                    sfp_server.clone(),
+                    https_addr,
+                    update_broadcast_cache.clone(),
+                )
+                .await?
+            }
+            (true, false) => {
+                let https_server = Self::create_https_server(
+                    cli,
+                    sfp_server.clone(),
+                    https_addr,
+                    update_broadcast_cache.clone(),
+                );
+                let http_server =
+                    Self::create_http_server(sfp_server, http_addr, update_broadcast_cache.clone());
+                println!(
+                    "GrpcServer listening on {} (HTTPS) and {} (HTTP)",
+                    https_addr, http_addr
+                );
+
+                // Use select! to run both servers concurrently
+                tokio::select! {
+                    https_result = https_server => {
+                        if let Err(e) = https_result {
+                            eprintln!("HTTPS server error: {:?}", e);
+                        }
+                    }
+                    http_result = http_server => {
+                        if let Err(e) = http_result {
+                            eprintln!("HTTP server error: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn create_https_server(
+        cli: &Cli,
+        sfp_server: StatsigForwardProxyServerImpl, // Remove & here
+        addr: std::net::SocketAddr,
+        update_broadcast_cache: Arc<
+            RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>,
+        >,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut builder = Server::builder();
+        if let (Some(cert_path), Some(key_path)) = (
+            cli.x509_server_cert_path.clone(),
+            cli.x509_server_key_path.clone(),
+        ) {
+            let cert = fs::read_to_string(cert_path)?;
+            let key = fs::read_to_string(key_path)?;
+            let server_tls_id =
+                tonic::transport::Identity::from_pem(cert.as_bytes(), key.as_bytes());
+            let mut tls = tonic::transport::ServerTlsConfig::new().identity(server_tls_id);
+            tls = tls.client_auth_optional(!cli.enforce_mtls);
+
+            if let Some(client_cert_path) = cli.x509_client_cert_path.clone() {
+                let encoded_client_cert = fs::read_to_string(client_cert_path)?;
+                let client_cert =
+                    tonic::transport::Certificate::from_pem(encoded_client_cert.as_bytes());
+                tls = tls.client_ca_root(client_cert);
+            }
+
+            builder = builder.tls_config(tls)?;
+        }
+        builder
+            .max_concurrent_streams(cli.grpc_max_concurrent_streams)
+            .add_service(StatsigForwardProxyServer::new(sfp_server)) // Remove .clone() here
             .serve_with_shutdown(addr, GrpcServer::shutdown_signal(update_broadcast_cache))
             .await?;
+        Ok(())
+    }
 
+    async fn create_http_server(
+        sfp_server: StatsigForwardProxyServerImpl, // Remove & here
+        addr: std::net::SocketAddr,
+        update_broadcast_cache: Arc<
+            RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>,
+        >,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Server::builder()
+            .add_service(StatsigForwardProxyServer::new(sfp_server)) // Remove .clone() here
+            .serve_with_shutdown(addr, GrpcServer::shutdown_signal(update_broadcast_cache))
+            .await?;
         Ok(())
     }
 }

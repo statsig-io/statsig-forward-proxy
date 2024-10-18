@@ -33,5 +33,5 @@ WORKDIR /app
 COPY ./.cargo ./.cargo
 COPY ./Rocket.toml ./Rocket.toml
 COPY --from=builder /statsig_forward_proxy/target/release/server /usr/local/bin/statsig_forward_proxy
-
+ENV ROCKET_ENV=prod
 ENTRYPOINT [ "statsig_forward_proxy" ]

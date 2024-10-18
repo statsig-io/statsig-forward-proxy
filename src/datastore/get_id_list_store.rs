@@ -1,4 +1,5 @@
 use super::data_providers::background_data_provider::{foreground_fetch, BackgroundDataProvider};
+use super::data_providers::http_data_provider::ResponsePayload;
 use super::data_providers::DataProviderRequestResult;
 use super::sdk_key_store::SdkKeyStore;
 use crate::observers::HttpDataProviderObserverTrait;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct IdlistForCompany {
-    pub idlists: Arc<str>,
+    pub idlists: Arc<ResponsePayload>,
 }
 
 pub struct GetIdListStore {
@@ -30,7 +31,7 @@ impl HttpDataProviderObserverTrait for GetIdListStore {
         result: &DataProviderRequestResult,
         request_context: &Arc<AuthorizedRequestContext>,
         _lcut: u64,
-        data: &Arc<str>,
+        data: &Arc<ResponsePayload>,
     ) {
         if result == &DataProviderRequestResult::Error
             || result == &DataProviderRequestResult::DataAvailable
@@ -46,7 +47,10 @@ impl HttpDataProviderObserverTrait for GetIdListStore {
         }
     }
 
-    async fn get(&self, request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
+    async fn get(
+        &self,
+        request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<ResponsePayload>> {
         self.store
             .get(request_context)
             .map(|record| record.idlists.clone())

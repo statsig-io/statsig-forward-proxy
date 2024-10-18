@@ -1,14 +1,14 @@
 pub mod http_data_provider_observer;
 pub mod proxy_event_observer;
 
-use dashmap::DashMap;
-use std::sync::Arc;
+use parking_lot::RwLock;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 
 use crate::{
-    datastore::data_providers::DataProviderRequestResult,
+    datastore::data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
     servers::authorized_request_context::AuthorizedRequestContext,
 };
 
@@ -21,9 +21,12 @@ pub trait HttpDataProviderObserverTrait {
         result: &DataProviderRequestResult,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<str>,
+        data: &Arc<ResponsePayload>,
     );
-    async fn get(&self, request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>>;
+    async fn get(
+        &self,
+        request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<ResponsePayload>>;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -154,18 +157,26 @@ impl ProxyEvent {
 
     pub fn get_sdk_key(&self) -> Option<Arc<str>> {
         self.request_context.as_ref().map(|rc| {
-            if let Some(cached_key) = SDK_KEY_CACHE.get(&rc.sdk_key) {
+            let cache = SDK_KEY_CACHE.read();
+            if let Some(cached_key) = cache.get(&rc.sdk_key) {
                 cached_key.clone()
             } else {
-                let new_key: Arc<str> = if rc.sdk_key.len() > 20 {
-                    let mut truncated = rc.sdk_key[..20].to_string();
-                    truncated.push_str("***");
-                    Arc::from(truncated)
+                drop(cache); // Release the read lock
+                let mut cache = SDK_KEY_CACHE.write();
+                // Check again in case another thread inserted the key
+                if let Some(cached_key) = cache.get(&rc.sdk_key) {
+                    cached_key.clone()
                 } else {
-                    Arc::from(rc.sdk_key.as_str())
-                };
-                SDK_KEY_CACHE.insert(rc.sdk_key.to_string(), new_key.clone());
-                new_key
+                    let new_key: Arc<str> = if rc.sdk_key.len() > 20 {
+                        let mut truncated = rc.sdk_key[..20].to_string();
+                        truncated.push_str("***");
+                        Arc::from(truncated)
+                    } else {
+                        Arc::from(rc.sdk_key.as_str())
+                    };
+                    cache.insert(rc.sdk_key.to_string(), new_key.clone());
+                    new_key
+                }
             }
         })
     }
@@ -190,7 +201,8 @@ impl ProxyEvent {
     }
 }
 
-static SDK_KEY_CACHE: Lazy<DashMap<String, Arc<str>>> = Lazy::new(DashMap::new);
+static SDK_KEY_CACHE: Lazy<RwLock<HashMap<String, Arc<str>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 
 #[async_trait]
 pub trait ProxyEventObserverTrait {

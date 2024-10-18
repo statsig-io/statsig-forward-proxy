@@ -1,13 +1,17 @@
 use crate::datastore::sdk_key_store::SdkKeyStore;
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
+use crate::GRACEFUL_SHUTDOWN_TOKEN;
 
+use super::http_data_provider::ResponsePayload;
 use super::request_builder::{CachedRequestBuilders, RequestBuilderTrait};
 use super::{http_data_provider::HttpDataProvider, DataProviderRequestResult, DataProviderTrait};
 use std::collections::hash_map::Entry;
 use std::{collections::HashMap, sync::Arc};
 
+use bytes::Bytes;
 use tokio::runtime::Handle;
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 use tokio::time::{Duration, Instant};
 
 pub struct BackgroundDataProvider {
@@ -63,7 +67,6 @@ fn should_perform_fetch(per_key_lock: &Option<Instant>) -> bool {
     match *per_key_lock {
         Some(init_time) => {
             let duration = Instant::now().duration_since(init_time);
-            println!("Duration since last fetch: {:?}", duration);
             duration >= Duration::from_secs(30)
         }
         None => true,
@@ -91,6 +94,7 @@ impl BackgroundDataProvider {
         let batch_size = self.update_batch_size;
         let polling_interval_in_s = self.polling_interval_in_s;
         let sdk_key_store = Arc::clone(&self.sdk_key_store);
+        let graceful_shutdown_token = GRACEFUL_SHUTDOWN_TOKEN.clone();
         rocket::tokio::task::spawn_blocking(move || {
             Handle::current().block_on(async move {
                 loop {
@@ -100,7 +104,15 @@ impl BackgroundDataProvider {
                         batch_size,
                     )
                     .await;
-                    rocket::tokio::time::sleep(Duration::from_secs(polling_interval_in_s)).await;
+
+                    if tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(polling_interval_in_s)) => { false },
+                        _ = graceful_shutdown_token.cancelled() => {
+                            true
+                        },
+                    } {
+                        break;
+                    }
                 }
             });
         });
@@ -111,25 +123,64 @@ impl BackgroundDataProvider {
         data_provider: &Arc<HttpDataProvider>,
         update_batch_size: u64,
     ) {
-        let mut join_handles = Vec::with_capacity(update_batch_size as usize);
+        match reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(0)
+            .build()
+        {
+            Ok(http_client) => {
+                let mut join_handles = Vec::with_capacity(update_batch_size as usize);
 
-        for (request_context, lcut) in store_iter {
-            let request_builder = CachedRequestBuilders::get_request_builder(&request_context.path);
-            if !request_builder.should_make_request(&request_context).await {
-                continue;
+                for (request_context, lcut) in store_iter {
+                    let request_builder =
+                        CachedRequestBuilders::get_request_builder(&request_context.path);
+                    if !request_builder.should_make_request(&request_context).await {
+                        continue;
+                    }
+
+                    let data_provider = data_provider.clone();
+                    let client_clone = http_client.clone();
+                    let join_handle = tokio::task::spawn(async move {
+                        match timeout(
+                            Duration::from_secs(60),
+                            Self::process_request(
+                                data_provider,
+                                request_builder,
+                                &request_context,
+                                lcut,
+                                &client_clone,
+                            ),
+                        )
+                        .await
+                        {
+                            Ok(_) => {}
+                            Err(_) => {
+                                let mut key = request_context.sdk_key.clone();
+                                key.truncate(20);
+                                eprintln!(
+                                "Error: process_request timed out after 60 seconds for request_context.. skipping update..({}): {}",
+                                key,
+                                request_context.path)
+                            }
+                        }
+                    });
+
+                    join_handles.push(join_handle);
+                    if join_handles.len() >= (update_batch_size as usize) {
+                        futures::future::join_all(join_handles.drain(..)).await;
+                    }
+                }
+                futures::future::join_all(join_handles).await;
             }
-
-            let data_provider = data_provider.clone();
-            let join_handle = tokio::task::spawn(async move {
-                Self::process_request(data_provider, request_builder, &request_context, lcut).await;
-            });
-
-            join_handles.push(join_handle);
-            if join_handles.len() >= (update_batch_size as usize) {
-                futures::future::join_all(join_handles.drain(..)).await;
+            Err(e) => {
+                eprintln!(
+                    "Failed to build http client.. skipping background update...: {}",
+                    e
+                );
             }
         }
-        futures::future::join_all(join_handles).await;
     }
 
     async fn process_request(
@@ -137,9 +188,10 @@ impl BackgroundDataProvider {
         request_builder: Arc<dyn RequestBuilderTrait>,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
+        http_client: &reqwest::Client,
     ) {
         let dp_result = data_provider
-            .get(&request_builder, request_context, lcut)
+            .get(http_client, &request_builder, request_context, lcut)
             .await;
 
         match dp_result.result {
@@ -179,7 +231,10 @@ impl BackgroundDataProvider {
                     &dp_result.result,
                     request_context,
                     lcut,
-                    &Arc::from(String::new()),
+                    &(Arc::new(ResponsePayload {
+                        encoding: Arc::new(None),
+                        data: Arc::new(Bytes::new()),
+                    })),
                 )
                 .await;
             }
@@ -192,7 +247,7 @@ impl BackgroundDataProvider {
         result: &DataProviderRequestResult,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<str>,
+        data: &Arc<ResponsePayload>,
     ) {
         request_builder
             .get_observers()

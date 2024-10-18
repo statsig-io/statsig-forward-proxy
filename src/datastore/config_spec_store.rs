@@ -1,4 +1,5 @@
 use super::data_providers::background_data_provider::{foreground_fetch, BackgroundDataProvider};
+use super::data_providers::http_data_provider::ResponsePayload;
 use super::data_providers::DataProviderRequestResult;
 use super::sdk_key_store::SdkKeyStore;
 
@@ -7,15 +8,18 @@ use crate::observers::{
     EventStat, HttpDataProviderObserverTrait, OperationType, ProxyEvent, ProxyEventType,
 };
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
-use dashmap::DashMap;
+use bytes::Bytes;
 
 use chrono::Utc;
+
 use std::sync::Arc;
+
+use dashmap::DashMap;
 
 #[derive(Clone, Debug)]
 pub struct ConfigSpecForCompany {
     pub lcut: u64,
-    pub config: Arc<str>,
+    pub config: Arc<ResponsePayload>,
 }
 
 pub struct ConfigSpecStore {
@@ -37,7 +41,7 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
         result: &DataProviderRequestResult,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<str>,
+        data: &Arc<ResponsePayload>,
     ) {
         let should_insert = result == &DataProviderRequestResult::Error
             || (result == &DataProviderRequestResult::DataAvailable
@@ -81,14 +85,17 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                             }),
                         );
                     })
-                    .or_insert_with(|| new_data);
+                    .or_insert(new_data);
             }
         } else if result == &DataProviderRequestResult::Unauthorized {
             self.store.remove(request_context);
         }
     }
 
-    async fn get(&self, request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
+    async fn get(
+        &self,
+        request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<ResponsePayload>> {
         self.store
             .get(request_context)
             .map(|record| record.config.clone())
@@ -106,7 +113,10 @@ impl ConfigSpecStore {
             background_data_provider,
             no_update_config_spec: Arc::new(ConfigSpecForCompany {
                 lcut: 0,
-                config: Arc::from("{\"has_updates\":false}".to_string()),
+                config: Arc::new(ResponsePayload {
+                    encoding: Arc::new(None),
+                    data: Arc::new(Bytes::from("{\"has_updates\":false}".to_string())),
+                }),
             }),
         }
     }

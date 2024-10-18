@@ -1,4 +1,5 @@
 use crate::observers::{ProxyEvent, ProxyEventObserverTrait};
+use crate::GRACEFUL_SHUTDOWN_TOKEN;
 use async_trait::async_trait;
 
 use dogstatsd::{BatchingOptions, Client, OptionsBuilder};
@@ -93,10 +94,20 @@ impl StatsLogger {
                 .await;
             });
         });
+
+        let graceful_shutdown_token = GRACEFUL_SHUTDOWN_TOKEN.clone();
         rocket::tokio::task::spawn_blocking(move || {
             Handle::current().block_on(async move {
                 loop {
-                    rocket::tokio::time::sleep(Duration::from_secs(60)).await;
+                    if tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(60)) => { false },
+                        _ = graceful_shutdown_token.cancelled() => {
+                            true
+                        },
+                    } {
+                        break;
+                    }
+
                     TAG_CACHE
                         .lock()
                         .retain(|_, (_, last_used)| last_used.elapsed() > Duration::from_secs(60));
@@ -227,6 +238,7 @@ mod batching {
 
     use std::sync::Arc;
 
+    use cached::proc_macro::once;
     use dogstatsd::Options;
     use statsig::StatsigEvent;
 
@@ -234,11 +246,15 @@ mod batching {
 
     use super::*;
 
-    lazy_static! {
-        static ref STATSD_CLIENT: Arc<Client> = Arc::new(
-            Client::new(initialize_datadog_client_options())
-                .expect("Need datadog client if enabled")
-        );
+    #[once(option = true)]
+    fn get_or_initialize_client() -> Option<Arc<Client>> {
+        match Client::new(initialize_datadog_client_options()) {
+            Ok(client) => Some(Arc::new(client)),
+            Err(e) => {
+                eprintln!("Failed to initialize statsd client: {}", e);
+                None
+            }
+        }
     }
 
     fn initialize_datadog_client_options() -> Options {
@@ -331,51 +347,60 @@ mod batching {
     }
 
     fn send_timing(event: &Operation) -> bool {
-        match STATSD_CLIENT.timing(&event.counter_name, event.value, event.tags.as_ref()) {
-            Ok(()) => true,
-            Err(err) => {
-                eprintln!("Failed to update timing for counter: {}", err);
-                false
+        if let Some(statsd_client) = get_or_initialize_client() {
+            match statsd_client.timing(&event.counter_name, event.value, event.tags.as_ref()) {
+                Ok(()) => return true,
+                Err(err) => {
+                    eprintln!("Failed to update timing for counter: {}", err);
+                }
             }
         }
+        false
     }
 
     fn send_distribution(event: &Operation) -> bool {
-        match STATSD_CLIENT.distribution(
-            &event.counter_name,
-            event.value.to_string(),
-            event.tags.as_ref(),
-        ) {
-            Ok(()) => true,
-            Err(err) => {
-                eprintln!("Failed to update latency for counter: {}", err);
-                false
+        if let Some(statsd_client) = get_or_initialize_client() {
+            match statsd_client.distribution(
+                &event.counter_name,
+                event.value.to_string(),
+                event.tags.as_ref(),
+            ) {
+                Ok(()) => return true,
+                Err(err) => {
+                    eprintln!("Failed to update latency for counter: {}", err);
+                }
             }
         }
+        false
     }
 
     fn send_gauge(event: &Operation) -> bool {
-        match STATSD_CLIENT.gauge(
-            &event.counter_name,
-            event.value.to_string(),
-            event.tags.as_ref(),
-        ) {
-            Ok(()) => true,
-            Err(err) => {
-                eprintln!("Failed to update gauge for counter: {}", err);
-                false
+        if let Some(statsd_client) = get_or_initialize_client() {
+            match statsd_client.gauge(
+                &event.counter_name,
+                event.value.to_string(),
+                event.tags.as_ref(),
+            ) {
+                Ok(()) => return true,
+                Err(err) => {
+                    eprintln!("Failed to update gauge for counter: {}", err);
+                }
             }
         }
+        false
     }
 
     fn send_incr_by_value(event: &Operation) -> bool {
-        match STATSD_CLIENT.incr_by_value(&event.counter_name, event.value, event.tags.as_ref()) {
-            Ok(()) => true,
-            Err(err) => {
-                eprintln!("Failed to update increment for counter: {}", err);
-                false
+        if let Some(statsd_client) = get_or_initialize_client() {
+            match statsd_client.incr_by_value(&event.counter_name, event.value, event.tags.as_ref())
+            {
+                Ok(()) => return true,
+                Err(err) => {
+                    eprintln!("Failed to update increment for counter: {}", err);
+                }
             }
         }
+        false
     }
 
     fn parse_key_value(s: &str) -> Option<(String, serde_json::Value)> {
@@ -426,31 +451,35 @@ mod batching {
         let max_batch_time =
             Duration::from_millis(CONFIG.datadog_max_batch_time_ms.unwrap_or(10000));
         let max_batch_size = CONFIG.datadog_max_batch_event_count.unwrap_or(3000);
+        let graceful_shutdown_token = GRACEFUL_SHUTDOWN_TOKEN.clone();
 
         loop {
-            if let Some(operation) = rx.recv().await {
-                match operation.operation_type {
-                    OperationType::IncrByValue => {
-                        *incr_op_map
-                            .entry((operation.counter_name.clone(), operation.tags.clone()))
-                            .or_insert(0) += operation.value;
+            tokio::select! {
+                Some(operation) = rx.recv() => {
+                    match operation.operation_type {
+                        OperationType::IncrByValue => {
+                            *incr_op_map
+                                .entry((operation.counter_name.clone(), operation.tags.clone()))
+                                .or_insert(0) += operation.value;
+                        }
+                        _ => batch.push(operation),
                     }
-                    _ => batch.push(operation),
-                }
 
-                if batch.len() + incr_op_map.len() >= max_batch_size
-                    || last_updated.elapsed() >= max_batch_time
-                {
-                    let final_batch = std::mem::take(&mut batch);
-                    let final_incr_op_map = std::mem::take(&mut incr_op_map);
-                    tokio::spawn(flush(
-                        final_batch,
-                        final_incr_op_map,
-                        write_to_statsd,
-                        write_to_statsig,
-                    ));
-                    last_updated = Instant::now();
-                }
+                    if batch.len() + incr_op_map.len() >= max_batch_size
+                        || last_updated.elapsed() >= max_batch_time
+                    {
+                        let final_batch = std::mem::take(&mut batch);
+                        let final_incr_op_map = std::mem::take(&mut incr_op_map);
+                        tokio::spawn(flush(
+                            final_batch,
+                            final_incr_op_map,
+                            write_to_statsd,
+                            write_to_statsig,
+                        ));
+                        last_updated = Instant::now();
+                    }
+                },
+                _ = graceful_shutdown_token.cancelled() => break,
             }
         }
     }

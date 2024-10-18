@@ -1,5 +1,6 @@
 use crate::{
-    datastore::data_providers::DataProviderRequestResult, observers::HttpDataProviderObserverTrait,
+    datastore::data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
+    observers::HttpDataProviderObserverTrait,
     servers::authorized_request_context::AuthorizedRequestContext,
 };
 
@@ -20,12 +21,15 @@ impl HttpDataProviderObserverTrait for DisabledCache {
         _result: &DataProviderRequestResult,
         _request_context: &Arc<AuthorizedRequestContext>,
         _lcut: u64,
-        _data: &Arc<str>,
+        _data: &Arc<ResponsePayload>,
     ) {
         /* noop */
     }
 
-    async fn get(&self, _request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
+    async fn get(
+        &self,
+        _request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<ResponsePayload>> {
         return None;
     }
 }

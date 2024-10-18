@@ -118,7 +118,20 @@ impl RequestBuilderTrait for DcsRequestBuilder {
             ),
         };
 
-        http_client.get(url).send().await
+        if request_context.use_gzip {
+            http_client
+                .get(url)
+                .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+                .timeout(Duration::from_secs(30))
+                .send()
+                .await
+        } else {
+            http_client
+                .get(url)
+                .timeout(Duration::from_secs(30))
+                .send()
+                .await
+        }
     }
 
     async fn is_an_update(&self, body: &str, _sdk_key: &str) -> bool {

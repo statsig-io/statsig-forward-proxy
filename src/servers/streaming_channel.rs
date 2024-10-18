@@ -1,3 +1,4 @@
+use crate::datastore::data_providers::http_data_provider::ResponsePayload;
 use crate::datastore::data_providers::DataProviderRequestResult;
 use crate::observers::HttpDataProviderObserverTrait;
 use async_trait::async_trait;
@@ -6,7 +7,6 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
 
-use super::grpc_server::statsig_forward_proxy::ConfigSpecResponse;
 use crate::observers::proxy_event_observer::ProxyEventObserver;
 use crate::observers::EventStat;
 use crate::observers::OperationType;
@@ -16,7 +16,7 @@ use crate::servers::authorized_request_context::AuthorizedRequestContext;
 pub struct StreamingChannel {
     request_context: Arc<AuthorizedRequestContext>,
     last_updated: Arc<RwLock<u64>>,
-    pub sender: Arc<RwLock<Sender<Option<ConfigSpecResponse>>>>,
+    pub sender: Arc<RwLock<Sender<Option<(Arc<ResponsePayload>, u64)>>>>,
 }
 
 impl StreamingChannel {
@@ -41,7 +41,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
         result: &DataProviderRequestResult,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        data: &Arc<str>,
+        data: &Arc<ResponsePayload>,
     ) {
         let mut wlock = self.last_updated.write().await;
         let is_newer_lcut = lcut > *wlock;
@@ -63,10 +63,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
                 .sender
                 .write()
                 .await
-                .send(Some(ConfigSpecResponse {
-                    spec: data.to_string(),
-                    last_updated: lcut,
-                }))
+                .send(Some((Arc::clone(data), lcut)))
                 .is_err()
             {
                 // TODO: Optimize code, no receivers are listening
@@ -78,7 +75,10 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
         }
     }
 
-    async fn get(&self, _request_context: &Arc<AuthorizedRequestContext>) -> Option<Arc<str>> {
+    async fn get(
+        &self,
+        _request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<ResponsePayload>> {
         unimplemented!("Not Used")
     }
 }

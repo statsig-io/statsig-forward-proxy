@@ -1,6 +1,10 @@
+use std::fs;
+
 use chrono::Local;
 use statsig_forward_proxy::statsig_forward_proxy_client::StatsigForwardProxyClient;
 use statsig_forward_proxy::ConfigSpecRequest;
+
+use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 
 pub mod statsig_forward_proxy {
     tonic::include_proto!("statsig_forward_proxy");
@@ -15,16 +19,26 @@ fn last_500_char(spec: &String) -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = StatsigForwardProxyClient::connect("http://0.0.0.0:50051")
-        .await?
-        // 16mb -- default is 4mb
-        .max_decoding_message_size(16777216);
+    let pem = std::fs::read_to_string("./x509_test_certs/root/certs/root_ca.crt")?;
+    let cert = fs::read_to_string("./x509_test_certs/intermediate/certs/client.crt")?;
+    let key = fs::read_to_string("./x509_test_certs/intermediate/private/client.key")?;
+    let client_tls_id = tonic::transport::Identity::from_pem(cert.as_bytes(), key.as_bytes());
+    let ca = Certificate::from_pem(pem);
+    let tls = ClientTlsConfig::new()
+        .ca_certificate(ca)
+        .identity(client_tls_id);
+    let channel = Channel::from_static("http://0.0.0.0:50051")
+        .tls_config(tls)?
+        .connect()
+        .await?;
+
+    let mut client = StatsigForwardProxyClient::new(channel).max_decoding_message_size(20870203);
 
     // Non-Streaming
     for version in 0..3 {
         let request = tonic::Request::new(ConfigSpecRequest {
             since_time: Some(1234),
-            sdk_key: "1234".into(),
+            sdk_key: "secret-1234".into(),
             version: Some(version),
         });
         let response: tonic::Response<statsig_forward_proxy::ConfigSpecResponse> =
@@ -42,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Streaming
     let request = tonic::Request::new(ConfigSpecRequest {
         since_time: Some(1234),
-        sdk_key: "1234".into(),
+        sdk_key: "secret-1234".into(),
         version: Some(2),
     });
     let response = client.stream_config_spec(request).await?;
