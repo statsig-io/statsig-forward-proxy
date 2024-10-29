@@ -1,5 +1,6 @@
 [global]
-address = "0.0.0.0"
+address = "127.0.0.1"
+port = 8001
 limits = { json = "5 MiB", string = "5 MiB" }
 log_level = "critical"
 workers = 128

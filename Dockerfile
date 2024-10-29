@@ -26,12 +26,30 @@ COPY ./api-interface-definitions ./api-interface-definitions
 RUN rm ./target/release/deps/server*
 RUN cargo build --release
 
-FROM amd64/rust:1.75-slim
+FROM nginx:alpine
 
-# copy the build artifact from the build stage
-WORKDIR /app
-COPY ./.cargo ./.cargo
-COPY ./Rocket.toml ./Rocket.toml
+# Copy Nginx configuration
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# Copy the build artifact from the build stage
 COPY --from=builder /statsig_forward_proxy/target/release/server /usr/local/bin/statsig_forward_proxy
+
+# Copy other necessary files
+COPY ./.cargo /app/.cargo
+COPY ./Rocket.toml /app/Rocket.toml
+
+# Set working directory
+WORKDIR /app
+
+# Set environment variable
 ENV ROCKET_ENV=prod
-ENTRYPOINT [ "statsig_forward_proxy" ]
+
+# Expose port 8001 for Nginx and 8000 for the proxy
+EXPOSE 8000 8001
+
+# Create an entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Use ENTRYPOINT to run the script
+ENTRYPOINT ["/entrypoint.sh"]

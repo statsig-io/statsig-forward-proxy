@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 
 use parking_lot::RwLock;
-use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::time::Instant;
+use std::{collections::HashMap, sync::Arc};
+use tokio::time::Duration;
 
 use crate::{
     observers::{
@@ -149,100 +148,5 @@ impl RequestBuilderTrait for DcsRequestBuilder {
 
     async fn should_make_request(&self, _rc: &Arc<AuthorizedRequestContext>) -> bool {
         true
-    }
-}
-
-pub struct IdlistRequestBuilder {
-    pub http_observers: Arc<HttpDataProviderObserver>,
-    pub backup_cache: Arc<dyn HttpDataProviderObserverTrait + Sync + Send>,
-    last_request_by_key: RwLock<HashMap<String, Instant>>,
-    last_response_hash: RwLock<HashMap<String, String>>,
-}
-
-impl IdlistRequestBuilder {
-    pub fn new(
-        http_observers: Arc<HttpDataProviderObserver>,
-        backup_cache: Arc<dyn HttpDataProviderObserverTrait + Sync + Send>,
-    ) -> IdlistRequestBuilder {
-        IdlistRequestBuilder {
-            http_observers,
-            backup_cache,
-            last_request_by_key: RwLock::new(HashMap::new()),
-            last_response_hash: RwLock::new(HashMap::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl RequestBuilderTrait for IdlistRequestBuilder {
-    async fn make_request(
-        &self,
-        http_client: &reqwest::Client,
-        request_context: &Arc<AuthorizedRequestContext>,
-        _lcut: u64,
-    ) -> Result<reqwest::Response, reqwest::Error> {
-        match http_client
-            .post("https://api.statsig.com/v1/get_id_lists".to_string())
-            .header("statsig-api-key", request_context.sdk_key.clone())
-            .body("{}".to_string())
-            .send()
-            .await
-        {
-            Ok(response) => {
-                let status_code = response.status().as_u16();
-                // If unauthorized, remove key from last response hash such that
-                // we will reload data into memory if for some reason the key is
-                // re-authorized
-                if status_code == 401 || status_code == 403 {
-                    self.last_response_hash
-                        .write()
-                        .remove(&request_context.sdk_key);
-                }
-                Ok(response)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn is_an_update(&self, body: &str, sdk_key: &str) -> bool {
-        let hash = format!("{:x}", Sha256::digest(body));
-        let mut wlock = self.last_response_hash.write();
-        let mut is_an_update = true;
-        if let Some(old_hash) = wlock.get(sdk_key) {
-            is_an_update = hash != *old_hash;
-        }
-
-        if is_an_update {
-            wlock.insert(sdk_key.to_string(), hash);
-        }
-
-        is_an_update
-    }
-
-    fn get_observers(&self) -> Arc<HttpDataProviderObserver> {
-        Arc::clone(&self.http_observers)
-    }
-
-    fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send> {
-        Arc::clone(&self.backup_cache)
-    }
-
-    async fn should_make_request(&self, rc: &Arc<AuthorizedRequestContext>) -> bool {
-        let mut wlock = self.last_request_by_key.write();
-        let key = rc.to_string();
-        match wlock.get_mut(&key) {
-            Some(last_request) => {
-                if last_request.elapsed() > Duration::from_secs(60) {
-                    wlock.insert(key, Instant::now());
-                    return true;
-                }
-
-                return false;
-            }
-            None => {
-                wlock.insert(key, Instant::now());
-                return true;
-            }
-        }
     }
 }

@@ -21,26 +21,51 @@ Usage: server [OPTIONS] <MODE> <CACHE>
 
 Arguments:
   <MODE>   [possible values: grpc-and-http, grpc, http]
-  <CACHE>  [possible values: disabled, local, redis]
+  <CACHE>  [possible values: disabled, redis]
 
 Options:
+      --double-write-cache-for-legacy-key
+
       --datadog-logging
+
       --statsd-logging
+
       --statsig-logging
+
       --debug-logging
-  -m, --maximum-concurrent-sdk-keys <MAXIMUM_CONCURRENT_SDK_KEYS>  [default: 1000]
-  -p, --polling-interval-in-s <POLLING_INTERVAL_IN_S>              [default: 10]
-  -u, --update-batch-size <UPDATE_BATCH_SIZE>                      [default: 64]
-  -r, --redis-leader-key-ttl <REDIS_LEADER_KEY_TTL>                [default: 70]
-      --redis-cache-ttl-in-s <REDIS_CACHE_TTL_IN_S>                [default: 86400]
+
+  -m, --maximum-concurrent-sdk-keys <MAXIMUM_CONCURRENT_SDK_KEYS>
+          [default: 1000]
+  -p, --polling-interval-in-s <POLLING_INTERVAL_IN_S>
+          [default: 10]
+  -u, --update-batch-size <UPDATE_BATCH_SIZE>
+          [default: 64]
+  -r, --redis-leader-key-ttl <REDIS_LEADER_KEY_TTL>
+          [default: 70]
+      --redis-cache-ttl-in-s <REDIS_CACHE_TTL_IN_S>
+          [default: 86400]
+      --log-event-process-queue-size <LOG_EVENT_PROCESS_QUEUE_SIZE>
+          [default: 20000]
       --force-gcp-profiling-enabled
-  -g, --grpc-max-concurrent-streams <GRPC_MAX_CONCURRENT_STREAMS>  [default: 500]
-      --clear-external-datastore-on-unauthorized
+
+  -g, --grpc-max-concurrent-streams <GRPC_MAX_CONCURRENT_STREAMS>
+          [default: 500]
+      --clear-datastore-on-unauthorized
+
       --x509-server-cert-path <X509_SERVER_CERT_PATH>
+
       --x509-server-key-path <X509_SERVER_KEY_PATH>
+
       --x509-client-cert-path <X509_CLIENT_CERT_PATH>
-  -h, --help                                                       Print help
+
+      --enforce-tls <ENFORCE_TLS>
+          [default: true] [possible values: true, false]
+      --enforce-mtls
+
+  -h, --help
+          Print help
   -V, --version
+          Print version
 ```
 1. MODE:  This can be configured as grpc or http or grpc-and-http to allow for easy migrations.
 2. CACHE: This is for the backup cache. Local uses in process memory to cache backup values, while redis,
@@ -53,11 +78,12 @@ Additional logging parameters we support:
 ```
 --debug-logging: This enables state tracking logging that is emitted for various events within the proxy.
                  It will also emit useful data such as latency for some events.
+--double-write-cache-for-legacy-key: Starting in version 2.x.x, we begin to use a new key schema in preparation for SDKs to manage all key creation in external caches. This allows you to gracefully migrate by double writing to the old key as well.
 --statsig-logging: Send events to Statsig to monitor performance and behaviour of proxy.
 --statsd-logging: This will emit the same metrics and events using statsd.
 --datadog-logging: Same as statsd logging, but uses distribution metrics instead of timing
 --force_gcp_profiling_enabled: Enable gcp cloud profiler by force.
---clear-external-datastore-on-unauthorized: When a 401/403 is received, clear external caches (such as redis). Noting that this is a potential reliability trade off.
+--clear-datastore-on-unauthorized: When a 401/403 is received, clear external caches (such as redis), as well as, internal caches. Noting that this is a potential reliability trade off.
 ```
 
 # Configuration

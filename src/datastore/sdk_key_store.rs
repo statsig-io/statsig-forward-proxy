@@ -70,7 +70,7 @@ impl SdkKeyStore {
         self.keystore.read().contains_key(request_context)
     }
 
-    pub async fn get_registered_store(&self) -> Vec<(Arc<AuthorizedRequestContext>, u64)> {
+    pub fn get_registered_store(&self) -> Vec<(Arc<AuthorizedRequestContext>, u64)> {
         self.keystore
             .read()
             .iter()

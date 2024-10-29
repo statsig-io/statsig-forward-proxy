@@ -5,8 +5,7 @@ use crate::GRACEFUL_SHUTDOWN_TOKEN;
 use super::http_data_provider::ResponsePayload;
 use super::request_builder::{CachedRequestBuilders, RequestBuilderTrait};
 use super::{http_data_provider::HttpDataProvider, DataProviderRequestResult, DataProviderTrait};
-use std::collections::hash_map::Entry;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio::runtime::Handle;
@@ -14,31 +13,28 @@ use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio::time::{Duration, Instant};
 
+use dashmap::DashMap;
+
 pub struct BackgroundDataProvider {
     http_data_prover: Arc<HttpDataProvider>,
     polling_interval_in_s: u64,
     update_batch_size: u64,
     sdk_key_store: Arc<SdkKeyStore>,
-    foreground_fetch_lock:
-        RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<RwLock<Option<Instant>>>>>,
+    foreground_fetch_lock: DashMap<Arc<AuthorizedRequestContext>, Arc<RwLock<Option<Instant>>>>,
+    clear_datastore_on_unauthorized: bool,
 }
 
 pub async fn foreground_fetch(
     bdp: Arc<BackgroundDataProvider>,
     request_context: &Arc<AuthorizedRequestContext>,
     since_time: u64,
+    clear_datastore_on_unauthorized: bool,
 ) {
-    let lock_ref: Arc<RwLock<Option<Instant>>> = {
-        let mut master_lock = bdp.foreground_fetch_lock.write().await;
-        match master_lock.entry(Arc::clone(request_context)) {
-            Entry::Occupied(entry) => Arc::clone(entry.get()),
-            Entry::Vacant(entry) => {
-                let new_lock_ref = Arc::new(RwLock::new(None));
-                entry.insert(Arc::clone(&new_lock_ref));
-                new_lock_ref
-            }
-        }
-    };
+    let lock_ref: Arc<RwLock<Option<Instant>>> = bdp
+        .foreground_fetch_lock
+        .entry(Arc::clone(request_context))
+        .or_insert_with(|| Arc::new(RwLock::new(None)))
+        .clone();
 
     let should_fetch = {
         let per_key_lock = lock_ref.read().await;
@@ -57,6 +53,7 @@ pub async fn foreground_fetch(
                 vec![(Arc::clone(request_context), since_time)],
                 &bdp.http_data_prover,
                 1,
+                clear_datastore_on_unauthorized,
             )
             .await;
         }
@@ -79,13 +76,15 @@ impl BackgroundDataProvider {
         polling_interval_in_s: u64,
         update_batch_size: u64,
         sdk_key_store: Arc<SdkKeyStore>,
+        clear_datastore_on_unauthorized: bool,
     ) -> Self {
         BackgroundDataProvider {
             http_data_prover: data_provider,
             polling_interval_in_s,
             update_batch_size,
-            foreground_fetch_lock: RwLock::new(HashMap::new()),
+            foreground_fetch_lock: DashMap::new(),
             sdk_key_store,
+            clear_datastore_on_unauthorized,
         }
     }
 
@@ -95,13 +94,15 @@ impl BackgroundDataProvider {
         let polling_interval_in_s = self.polling_interval_in_s;
         let sdk_key_store = Arc::clone(&self.sdk_key_store);
         let graceful_shutdown_token = GRACEFUL_SHUTDOWN_TOKEN.clone();
+        let clear_datastore_on_unauthorized = self.clear_datastore_on_unauthorized;
         rocket::tokio::task::spawn_blocking(move || {
             Handle::current().block_on(async move {
                 loop {
                     BackgroundDataProvider::impl_foreground_fetch(
-                        sdk_key_store.get_registered_store().await,
+                        sdk_key_store.get_registered_store(),
                         &shared_data_provider,
                         batch_size,
+                        clear_datastore_on_unauthorized,
                     )
                     .await;
 
@@ -122,6 +123,7 @@ impl BackgroundDataProvider {
         store_iter: Vec<(Arc<AuthorizedRequestContext>, u64)>,
         data_provider: &Arc<HttpDataProvider>,
         update_batch_size: u64,
+        clear_datastore_on_unauthorized: bool,
     ) {
         match reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -151,6 +153,7 @@ impl BackgroundDataProvider {
                                 &request_context,
                                 lcut,
                                 &client_clone,
+                                clear_datastore_on_unauthorized,
                             ),
                         )
                         .await
@@ -189,6 +192,7 @@ impl BackgroundDataProvider {
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
         http_client: &reqwest::Client,
+        clear_datastore_on_unauthorized: bool,
     ) {
         let dp_result = data_provider
             .get(http_client, &request_builder, request_context, lcut)
@@ -226,17 +230,19 @@ impl BackgroundDataProvider {
                 }
             }
             DataProviderRequestResult::Unauthorized => {
-                Self::notify_observers(
-                    &request_builder,
-                    &dp_result.result,
-                    request_context,
-                    lcut,
-                    &(Arc::new(ResponsePayload {
-                        encoding: Arc::new(None),
-                        data: Arc::new(Bytes::new()),
-                    })),
-                )
-                .await;
+                if clear_datastore_on_unauthorized {
+                    Self::notify_observers(
+                        &request_builder,
+                        &dp_result.result,
+                        request_context,
+                        lcut,
+                        &(Arc::new(ResponsePayload {
+                            encoding: Arc::new(None),
+                            data: Arc::new(Bytes::new()),
+                        })),
+                    )
+                    .await;
+                }
             }
             _ => {}
         }
