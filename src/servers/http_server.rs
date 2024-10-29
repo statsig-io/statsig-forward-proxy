@@ -2,14 +2,12 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use crate::datastore::data_providers::http_data_provider::ResponsePayload;
-use crate::datastore::get_id_list_store::GetIdListStore;
-
 use crate::datastore::log_event_store::LogEventStore;
 
 use crate::datatypes::gzip_data::LoggedBodyJSON;
 use crate::datatypes::log_event::LogEventRequest;
 use crate::datatypes::log_event::LogEventResponse;
+use crate::http_data_provider::ResponsePayload;
 use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{ProxyEvent, ProxyEventType};
@@ -168,17 +166,6 @@ async fn post_download_config_specs(
     }
 }
 
-#[post("/get_id_lists")]
-async fn post_get_id_lists(
-    get_id_list_store: &State<Arc<GetIdListStore>>,
-    authorized_rc: AuthorizedRequestContextWrapper,
-) -> RequestPayloads {
-    match get_id_list_store.get_id_lists(&authorized_rc.inner()).await {
-        Some(data) => RequestPayloads::Plain(Arc::clone(&data.idlists.data)),
-        None => RequestPayloads::Unauthorized(),
-    }
-}
-
 #[post("/log_event", data = "<request_body>")]
 async fn post_log_event(
     log_event_store: &State<Arc<LogEventStore>>,
@@ -211,7 +198,6 @@ impl HttpServer {
     pub async fn start_server(
         cli: &Cli,
         config_spec_store: Arc<ConfigSpecStore>,
-        id_list_store: Arc<GetIdListStore>,
         log_event_store: Arc<LogEventStore>,
         rc_cache: Arc<AuthorizedRequestContextCache>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -223,7 +209,6 @@ impl HttpServer {
                 routes![
                     get_download_config_specs,
                     post_download_config_specs,
-                    post_get_id_lists,
                     post_log_event,
                     http_apis::healthchecks::startup,
                     http_apis::healthchecks::ready,
@@ -235,7 +220,6 @@ impl HttpServer {
                 routes![get_download_config_specs, post_download_config_specs],
             )
             .manage(config_spec_store)
-            .manage(id_list_store)
             .manage(log_event_store)
             .manage(rc_cache)
             .manage(sdk_key_cache)

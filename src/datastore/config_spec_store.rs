@@ -129,7 +129,16 @@ impl ConfigSpecStore {
         if !self.sdk_key_store.has_key(request_context) {
             // Since it's a cache-miss, just fill with a full payload
             // and check if we should return no update manually
-            foreground_fetch(self.background_data_provider.clone(), request_context, 0).await;
+            foreground_fetch(
+                self.background_data_provider.clone(),
+                request_context,
+                0,
+                // Since it's a cache-miss, it doesn't matter what we do
+                // if we receive a 4xx, so no point clearing any
+                // caches
+                false,
+            )
+            .await;
         }
 
         // TODO: Since we use peek as an optimization

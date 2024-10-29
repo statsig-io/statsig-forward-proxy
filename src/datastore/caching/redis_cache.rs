@@ -33,8 +33,8 @@ pub struct RedisCache {
     uuid: String,
     leader_key_ttl: i64,
     check_lcut: bool,
-    clear_external_datastore_on_unauthorized: bool,
     redis_cache_ttl_in_s: i64,
+    double_write_cache_for_legacy_key: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -50,14 +50,146 @@ pub struct RedisEnvConfig {
 
 const REDIS_LEADER_KEY: &str = "statsig_forward_proxy::leader";
 
+use async_trait::async_trait;
+#[async_trait]
+impl HttpDataProviderObserverTrait for RedisCache {
+    fn force_notifier_to_wait_for_update(&self) -> bool {
+        false
+    }
+
+    async fn update(
+        &self,
+        result: &DataProviderRequestResult,
+        request_context: &Arc<AuthorizedRequestContext>,
+        lcut: u64,
+        data: &Arc<ResponsePayload>,
+    ) {
+        self.update_impl(
+            self.get_redis_key(request_context).await,
+            result,
+            request_context,
+            lcut,
+            data,
+        )
+        .await;
+
+        if self.double_write_cache_for_legacy_key {
+            self.update_impl(
+                format!(
+                    "{}::{}",
+                    self.key_prefix,
+                    self.hash_key(&request_context.sdk_key).await
+                ),
+                result,
+                request_context,
+                lcut,
+                data,
+            )
+            .await;
+        }
+    }
+
+    async fn get(
+        &self,
+        request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<ResponsePayload>> {
+        let connection = self.connection.get().await;
+        let redis_key = self.get_redis_key(request_context).await;
+        match connection {
+            Ok(mut conn) => {
+                let res: Result<Vec<u8>, RedisError> = conn.hget(redis_key, "config").await;
+                match res {
+                    Ok(data) => {
+                        if data.is_empty() {
+                            ProxyEventObserver::publish_event(
+                                ProxyEvent::new_with_rc(
+                                    ProxyEventType::RedisCacheReadMiss,
+                                    request_context,
+                                )
+                                .with_stat(EventStat {
+                                    operation_type: OperationType::IncrByValue,
+                                    value: 1,
+                                }),
+                            );
+                            None
+                        } else {
+                            ProxyEventObserver::publish_event(
+                                ProxyEvent::new_with_rc(
+                                    ProxyEventType::RedisCacheReadSucceed,
+                                    request_context,
+                                )
+                                .with_stat(EventStat {
+                                    operation_type: OperationType::IncrByValue,
+                                    value: 1,
+                                }),
+                            );
+
+                            // Only decompress before writing for legacy use case
+                            match request_context.use_gzip && self.double_write_cache_for_legacy_key
+                            {
+                                true => {
+                                    let mut compressed = Vec::new();
+                                    let mut encoder =
+                                        GzEncoder::new(&mut compressed, Compression::best());
+                                    if let Err(e) = encoder.write_all(&data) {
+                                        eprintln!("Failed to gzip data from redis: {:?}", e);
+                                        return None;
+                                    }
+                                    if let Err(e) = encoder.finish() {
+                                        eprintln!("Failed to gzip data from redis: {:?}", e);
+                                        return None;
+                                    }
+                                    Some(Arc::new(ResponsePayload {
+                                        encoding: Arc::new(Some("gzip".to_string())),
+                                        data: Arc::from(Bytes::from(compressed)),
+                                    }))
+                                }
+                                false => Some(Arc::new(ResponsePayload {
+                                    encoding: Arc::new(None),
+                                    data: Arc::from(Bytes::from(data)),
+                                })),
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        ProxyEventObserver::publish_event(
+                            ProxyEvent::new_with_rc(
+                                ProxyEventType::RedisCacheReadFailed,
+                                request_context,
+                            )
+                            .with_stat(EventStat {
+                                operation_type: OperationType::IncrByValue,
+                                value: 1,
+                            }),
+                        );
+                        eprintln!("Failed to get key from redis: {:?}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                ProxyEventObserver::publish_event(
+                    ProxyEvent::new_with_rc(ProxyEventType::RedisCacheReadFailed, request_context)
+                        .with_stat(EventStat {
+                            operation_type: OperationType::IncrByValue,
+                            value: 1,
+                        }),
+                );
+                eprintln!("Failed to get connection to redis: {:?}", e);
+                None
+            }
+        }
+    }
+}
+
 impl RedisCache {
     pub async fn new(
         key_prefix: String,
         leader_key_ttl: i64,
         uuid: &str,
         check_lcut: bool,
-        clear_external_datastore_on_unauthorized: bool,
         redis_cache_ttl_in_s: i64,
+        double_write_cache_for_legacy_key: bool,
     ) -> Self {
         let config = envy::from_env::<RedisEnvConfig>().expect("Malformed config");
         let protocol = match config.redis_tls.is_some_and(|x| x) {
@@ -91,9 +223,18 @@ impl RedisCache {
             uuid: uuid.to_string(),
             leader_key_ttl,
             check_lcut,
-            clear_external_datastore_on_unauthorized,
             redis_cache_ttl_in_s,
+            double_write_cache_for_legacy_key,
         }
+    }
+
+    async fn get_redis_key(&self, request_context: &Arc<AuthorizedRequestContext>) -> String {
+        format!(
+            "statsig|{}|{}|{}",
+            request_context.path,
+            request_context.use_gzip,
+            self.hash_key(&request_context.sdk_key).await
+        )
     }
 
     async fn hash_key(&self, key: &str) -> String {
@@ -108,36 +249,21 @@ impl RedisCache {
 
         // Hash key so that we aren't loading a bunch of sdk keys
         // into memory
-        let hashed_key = format!("{}::{:x}", self.key_prefix, Sha256::digest(key));
+        let hashed_key = format!("{:x}", Sha256::digest(key));
         self.hash_cache
             .write()
             .insert(key.to_string(), hashed_key.clone());
         hashed_key
     }
-}
 
-use async_trait::async_trait;
-#[async_trait]
-impl HttpDataProviderObserverTrait for RedisCache {
-    fn force_notifier_to_wait_for_update(&self) -> bool {
-        false
-    }
-
-    async fn update(
+    async fn update_impl(
         &self,
+        redis_key: String,
         result: &DataProviderRequestResult,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
         data: &Arc<ResponsePayload>,
     ) {
-        // TODO: This will be a problem if we start using DCS v2 with the forward
-        //       proxy because the redis data adapter currently has no way
-        //       to differentiate between the DCS v1 and DCS v2.
-        //
-        //       So for now, to keep functionality, continue using just
-        //       the sdk key.
-        let redis_key = self.hash_key(&request_context.sdk_key).await;
-
         if result == &DataProviderRequestResult::DataAvailable {
             let connection: Result<
                 bb8::PooledConnection<RedisConnectionManager>,
@@ -185,8 +311,9 @@ impl HttpDataProviderObserverTrait for RedisCache {
                     };
 
                     if should_update {
+                        // Only decompress before writing for legacy use case
                         let data_to_write = match request_context.use_gzip
-                            && data.encoding.as_deref() == Some("gzip")
+                            && self.double_write_cache_for_legacy_key
                         {
                             true => {
                                 let mut decoder = GzDecoder::new(Cursor::new(&**data.data));
@@ -278,9 +405,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                     );
                 }
             }
-        } else if result == &DataProviderRequestResult::Unauthorized
-            && self.clear_external_datastore_on_unauthorized
-        {
+        } else if result == &DataProviderRequestResult::Unauthorized {
             let connection = self.connection.get().await;
             match connection {
                 Ok(mut conn) => match conn.del(&redis_key).await {
@@ -326,104 +451,6 @@ impl HttpDataProviderObserverTrait for RedisCache {
                         e
                     );
                 }
-            }
-        }
-    }
-
-    async fn get(
-        &self,
-        request_context: &Arc<AuthorizedRequestContext>,
-    ) -> Option<Arc<ResponsePayload>> {
-        let connection = self.connection.get().await;
-        let redis_key = self.hash_key(&request_context.sdk_key).await;
-        match connection {
-            Ok(mut conn) => {
-                let mut pipe = redis::pipe();
-                let res = pipe
-                    .hget(redis_key.clone(), "encoding")
-                    .hget(redis_key, "config")
-                    .query_async::<MultiplexedConnection, (Option<String>, Vec<u8>)>(&mut *conn)
-                    .await;
-
-                match res {
-                    Ok(payload) => {
-                        if payload.1.is_empty() {
-                            ProxyEventObserver::publish_event(
-                                ProxyEvent::new_with_rc(
-                                    ProxyEventType::RedisCacheReadMiss,
-                                    request_context,
-                                )
-                                .with_stat(EventStat {
-                                    operation_type: OperationType::IncrByValue,
-                                    value: 1,
-                                }),
-                            );
-                            None
-                        } else {
-                            ProxyEventObserver::publish_event(
-                                ProxyEvent::new_with_rc(
-                                    ProxyEventType::RedisCacheReadSucceed,
-                                    request_context,
-                                )
-                                .with_stat(EventStat {
-                                    operation_type: OperationType::IncrByValue,
-                                    value: 1,
-                                }),
-                            );
-
-                            match request_context.use_gzip
-                                && payload.0.is_some_and(|encoding| encoding == "plain_text")
-                            {
-                                true => {
-                                    let mut compressed = Vec::new();
-                                    let mut encoder =
-                                        GzEncoder::new(&mut compressed, Compression::best());
-                                    if let Err(e) = encoder.write_all(&payload.1) {
-                                        eprintln!("Failed to gzip data from redis: {:?}", e);
-                                        return None;
-                                    }
-                                    if let Err(e) = encoder.finish() {
-                                        eprintln!("Failed to gzip data from redis: {:?}", e);
-                                        return None;
-                                    }
-                                    Some(Arc::new(ResponsePayload {
-                                        encoding: Arc::new(Some("gzip".to_string())),
-                                        data: Arc::new(Bytes::from(compressed)),
-                                    }))
-                                }
-                                false => Some(Arc::new(ResponsePayload {
-                                    encoding: Arc::new(None),
-                                    data: Arc::new(Bytes::from(payload.1)),
-                                })),
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        ProxyEventObserver::publish_event(
-                            ProxyEvent::new_with_rc(
-                                ProxyEventType::RedisCacheReadFailed,
-                                request_context,
-                            )
-                            .with_stat(EventStat {
-                                operation_type: OperationType::IncrByValue,
-                                value: 1,
-                            }),
-                        );
-                        eprintln!("Failed to get key from redis: {:?}", e);
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                ProxyEventObserver::publish_event(
-                    ProxyEvent::new_with_rc(ProxyEventType::RedisCacheReadFailed, request_context)
-                        .with_stat(EventStat {
-                            operation_type: OperationType::IncrByValue,
-                            value: 1,
-                        }),
-                );
-                eprintln!("Failed to get connection to redis: {:?}", e);
-                None
             }
         }
     }
