@@ -154,6 +154,10 @@ impl HttpDataProvider {
         start_time: Instant,
         request_context: &Arc<AuthorizedRequestContext>,
     ) -> u64 {
+        if !request_context.use_lcut {
+            return lcut;
+        }
+
         headers
             .get("x-since-time")
             .and_then(|value| value.to_str().ok())

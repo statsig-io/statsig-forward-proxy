@@ -26,7 +26,7 @@ pub struct ConfigSpecStore {
     store: Arc<DashMap<Arc<AuthorizedRequestContext>, Arc<ConfigSpecForCompany>>>,
     sdk_key_store: Arc<SdkKeyStore>,
     background_data_provider: Arc<BackgroundDataProvider>,
-    no_update_config_spec: Arc<ConfigSpecForCompany>,
+    no_update_config: Arc<ResponsePayload>,
 }
 
 use async_trait::async_trait;
@@ -95,10 +95,8 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
     async fn get(
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
-    ) -> Option<Arc<ResponsePayload>> {
-        self.store
-            .get(request_context)
-            .map(|record| record.config.clone())
+    ) -> Option<Arc<ConfigSpecForCompany>> {
+        self.store.get(request_context).map(|record| record.clone())
     }
 }
 
@@ -111,12 +109,9 @@ impl ConfigSpecStore {
             store: Arc::new(DashMap::new()),
             sdk_key_store,
             background_data_provider,
-            no_update_config_spec: Arc::new(ConfigSpecForCompany {
-                lcut: 0,
-                config: Arc::new(ResponsePayload {
-                    encoding: Arc::new(None),
-                    data: Arc::new(Bytes::from("{\"has_updates\":false}".to_string())),
-                }),
+            no_update_config: Arc::new(ResponsePayload {
+                encoding: Arc::new(None),
+                data: Arc::new(Bytes::from("{\"has_updates\":false}".to_string())),
             }),
         }
     }
@@ -155,7 +150,10 @@ impl ConfigSpecStore {
                 if lcut > since_time {
                     Some(record)
                 } else {
-                    Some(Arc::clone(&self.no_update_config_spec))
+                    Some(Arc::new(ConfigSpecForCompany {
+                        lcut,
+                        config: Arc::clone(&self.no_update_config),
+                    }))
                 }
             }
             None => {

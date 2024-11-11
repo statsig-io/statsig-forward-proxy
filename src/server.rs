@@ -7,6 +7,7 @@ use datastore::caching::disabled_cache;
 use datastore::config_spec_store::ConfigSpecStore;
 use datastore::data_providers::request_builder::CachedRequestBuilders;
 use datastore::data_providers::request_builder::DcsRequestBuilder;
+use datastore::data_providers::request_builder::IdlistRequestBuilder;
 use datastore::log_event_store::LogEventStore;
 use datastore::{
     caching::redis_cache,
@@ -19,6 +20,7 @@ use loggers::stats_logger;
 use observers::http_data_provider_observer::HttpDataProviderObserver;
 use tokio_util::sync::CancellationToken;
 
+use datastore::id_list_store::GetIdListStore;
 use servers::authorized_request_context::AuthorizedRequestContextCache;
 use statsig::{Statsig, StatsigOptions};
 
@@ -236,6 +238,29 @@ async fn create_log_event_store(
     store.clone()
 }
 
+async fn create_id_list_store(
+    _cli: &Cli,
+    background_data_provider: Arc<background_data_provider::BackgroundDataProvider>,
+    idlist_observer: Arc<HttpDataProviderObserver>,
+    shared_cache: &Arc<dyn HttpDataProviderObserverTrait + Send + Sync>,
+    sdk_key_store: &Arc<sdk_key_store::SdkKeyStore>,
+) -> Arc<GetIdListStore> {
+    let idlist_request_builder = Arc::new(IdlistRequestBuilder::new(
+        Arc::clone(&idlist_observer),
+        Arc::clone(shared_cache),
+    ));
+    CachedRequestBuilders::add_request_builder("/v1/get_id_lists/", idlist_request_builder);
+    let id_list_store = Arc::new(datastore::id_list_store::GetIdListStore::new(
+        sdk_key_store.clone(),
+        background_data_provider.clone(),
+    ));
+    idlist_observer.add_observer(sdk_key_store.clone()).await;
+    idlist_observer.add_observer(id_list_store.clone()).await;
+    idlist_observer.add_observer(Arc::clone(shared_cache)).await;
+
+    id_list_store
+}
+
 #[rocket::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -267,7 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.clear_datastore_on_unauthorized,
     ));
     let cache_uuid = Uuid::new_v4().to_string();
-    let config_spec_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
+    let redis_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
         CacheMode::Redis => Arc::new(
             redis_cache::RedisCache::new(
                 "statsig".to_string(),
@@ -287,7 +312,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &overrides,
         Arc::clone(&background_data_provider),
         Arc::clone(&config_spec_observer),
-        &config_spec_cache,
+        &redis_cache,
+        &sdk_key_store,
+    )
+    .await;
+    let idlist_observer = Arc::new(HttpDataProviderObserver::new());
+    let id_list_store = create_id_list_store(
+        &cli,
+        Arc::clone(&background_data_provider),
+        Arc::clone(&idlist_observer),
+        &redis_cache,
         &sdk_key_store,
     )
     .await;
@@ -316,6 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &cli,
                 config_spec_store,
                 log_event_store,
+                id_list_store,
                 rc_cache,
             )
             .await?
@@ -331,6 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &cli,
                 config_spec_store,
                 log_event_store,
+                id_list_store,
                 rc_cache,
             );
             join!(async { grpc_server.await.ok() }, async {

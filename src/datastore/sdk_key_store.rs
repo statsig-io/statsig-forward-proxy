@@ -1,3 +1,4 @@
+use super::config_spec_store::ConfigSpecForCompany;
 use super::data_providers::http_data_provider::ResponsePayload;
 use super::data_providers::DataProviderRequestResult;
 use crate::observers::HttpDataProviderObserverTrait;
@@ -44,7 +45,7 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
     async fn get(
         &self,
         _request_context: &Arc<AuthorizedRequestContext>,
-    ) -> Option<Arc<ResponsePayload>> {
+    ) -> Option<Arc<ConfigSpecForCompany>> {
         None
     }
 }
