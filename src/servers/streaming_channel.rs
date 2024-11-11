@@ -1,3 +1,4 @@
+use crate::datastore::config_spec_store::ConfigSpecForCompany;
 use crate::datastore::data_providers::http_data_provider::ResponsePayload;
 use crate::datastore::data_providers::DataProviderRequestResult;
 use crate::observers::HttpDataProviderObserverTrait;
@@ -78,7 +79,7 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
     async fn get(
         &self,
         _request_context: &Arc<AuthorizedRequestContext>,
-    ) -> Option<Arc<ResponsePayload>> {
+    ) -> Option<Arc<ConfigSpecForCompany>> {
         unimplemented!("Not Used")
     }
 }

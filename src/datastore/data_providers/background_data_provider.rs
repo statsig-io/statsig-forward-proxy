@@ -223,8 +223,8 @@ impl BackgroundDataProvider {
                         &request_builder,
                         &dp_result.result,
                         request_context,
-                        lcut,
-                        &backup_data,
+                        backup_data.lcut,
+                        &backup_data.config,
                     )
                     .await;
                 }

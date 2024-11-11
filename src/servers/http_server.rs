@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
+use crate::datastore::id_list_store::GetIdListStore;
 use crate::datastore::log_event_store::LogEventStore;
 
 use crate::datatypes::gzip_data::LoggedBodyJSON;
@@ -15,6 +16,7 @@ use crate::servers::http_apis;
 use crate::Cli;
 use bytes::Bytes;
 
+use cached::proc_macro::once;
 use rocket::fairing::AdHoc;
 
 use rocket::http::ContentType;
@@ -85,23 +87,25 @@ where
 }
 
 enum RequestPayloads {
-    Gzipped(Arc<Bytes>),
-    Plain(Arc<Bytes>),
+    Gzipped(Arc<Bytes>, u64),
+    Plain(Arc<Bytes>, u64),
     Unauthorized(),
 }
 
 impl<'r> Responder<'r, 'static> for RequestPayloads {
     fn respond_to(self, _req: &'r Request) -> Result<Response<'static>, Status> {
         match self {
-            RequestPayloads::Gzipped(data) => Response::build()
+            RequestPayloads::Gzipped(data, lcut) => Response::build()
                 .status(Status::Ok)
                 .header(ContentType::JSON)
                 .header(rocket::http::Header::new("Content-Encoding", "gzip"))
+                .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
                 .sized_body(data.len(), Cursor::new(DerefRef(data)))
                 .ok(),
-            RequestPayloads::Plain(data) => Response::build()
+            RequestPayloads::Plain(data, lcut) => Response::build()
                 .status(Status::Ok)
                 .header(ContentType::JSON)
+                .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
                 .sized_body(data.len(), Cursor::new(DerefRef(data)))
                 .ok(),
             RequestPayloads::Unauthorized() => Response::build()
@@ -129,9 +133,9 @@ async fn get_download_config_specs(
     {
         Some(data) => {
             if data.config.encoding.as_deref() == Some("gzip") {
-                RequestPayloads::Gzipped(Arc::clone(&data.config.data))
+                RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut)
             } else {
-                RequestPayloads::Plain(Arc::clone(&data.config.data))
+                RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut)
             }
         }
         None => RequestPayloads::Unauthorized(),
@@ -157,11 +161,29 @@ async fn post_download_config_specs(
     {
         Some(data) => {
             if data.config.encoding.as_deref() == Some("gzip") {
-                RequestPayloads::Gzipped(Arc::clone(&data.config.data))
+                RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut)
             } else {
-                RequestPayloads::Plain(Arc::clone(&data.config.data))
+                RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut)
             }
         }
+        None => RequestPayloads::Unauthorized(),
+    }
+}
+
+#[once]
+fn log_deprecated_function() {
+    eprintln!("[sfp][Please Remove Use] /v1/get_id_lists is deprecated and will be removed in the next major version.");
+}
+
+#[post("/get_id_lists")]
+async fn post_get_id_lists(
+    get_id_list_store: &State<Arc<GetIdListStore>>,
+    authorized_rc: AuthorizedRequestContextWrapper,
+) -> RequestPayloads {
+    log_deprecated_function();
+
+    match get_id_list_store.get_id_lists(&authorized_rc.inner()).await {
+        Some(data) => RequestPayloads::Plain(Arc::clone(&data.idlists.data), 0),
         None => RequestPayloads::Unauthorized(),
     }
 }
@@ -199,6 +221,7 @@ impl HttpServer {
         cli: &Cli,
         config_spec_store: Arc<ConfigSpecStore>,
         log_event_store: Arc<LogEventStore>,
+        id_list_store: Arc<GetIdListStore>,
         rc_cache: Arc<AuthorizedRequestContextCache>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let sdk_key_cache = SdkKeyCache(RwLock::new(HashMap::new()));
@@ -209,6 +232,7 @@ impl HttpServer {
                 routes![
                     get_download_config_specs,
                     post_download_config_specs,
+                    post_get_id_lists,
                     post_log_event,
                     http_apis::healthchecks::startup,
                     http_apis::healthchecks::ready,
@@ -221,6 +245,7 @@ impl HttpServer {
             )
             .manage(config_spec_store)
             .manage(log_event_store)
+            .manage(id_list_store)
             .manage(rc_cache)
             .manage(sdk_key_cache)
             .manage(cli.clone())
@@ -280,6 +305,11 @@ impl HttpServer {
                         .headers()
                         .get("Accept-Encoding")
                         .any(|v| v.to_lowercase().contains("gzip"));
+                    let lcut = resp
+                        .headers()
+                        .get_one("x-since-time")
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(0);
                     let path = req.uri().path().to_string();
                     let status_code = resp.status().code;
                     let status_class = resp.status().class();
@@ -297,6 +327,7 @@ impl HttpServer {
                             &request_context,
                         )
                         .with_status_code(status_code)
+                        .with_lcut(lcut)
                         .with_stat(EventStat {
                             operation_type: OperationType::Distribution,
                             value: ms,

@@ -9,7 +9,10 @@ use parking_lot::RwLock;
 use redis::aio::MultiplexedConnection;
 
 use crate::{
-    datastore::data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
+    datastore::{
+        config_spec_store::ConfigSpecForCompany,
+        data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
+    },
     observers::{
         proxy_event_observer::ProxyEventObserver, HttpDataProviderObserverTrait, ProxyEvent,
         ProxyEventType,
@@ -92,14 +95,20 @@ impl HttpDataProviderObserverTrait for RedisCache {
     async fn get(
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
-    ) -> Option<Arc<ResponsePayload>> {
+    ) -> Option<Arc<ConfigSpecForCompany>> {
         let connection = self.connection.get().await;
         let redis_key = self.get_redis_key(request_context).await;
         match connection {
             Ok(mut conn) => {
-                let res: Result<Vec<u8>, RedisError> = conn.hget(redis_key, "config").await;
+                let mut pipe = redis::pipe();
+                pipe.atomic();
+                let res: Result<(Option<u64>, Vec<u8>), RedisError> = pipe
+                    .hget(&redis_key, "lcut")
+                    .hget(&redis_key, "config")
+                    .query_async::<MultiplexedConnection, (Option<u64>, Vec<u8>)>(&mut *conn)
+                    .await;
                 match res {
-                    Ok(data) => {
+                    Ok((lcut, data)) => {
                         if data.is_empty() {
                             ProxyEventObserver::publish_event(
                                 ProxyEvent::new_with_rc(
@@ -123,7 +132,6 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                     value: 1,
                                 }),
                             );
-
                             // Only decompress before writing for legacy use case
                             match request_context.use_gzip && self.double_write_cache_for_legacy_key
                             {
@@ -139,14 +147,20 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                         eprintln!("Failed to gzip data from redis: {:?}", e);
                                         return None;
                                     }
-                                    Some(Arc::new(ResponsePayload {
-                                        encoding: Arc::new(Some("gzip".to_string())),
-                                        data: Arc::from(Bytes::from(compressed)),
+                                    Some(Arc::new(ConfigSpecForCompany {
+                                        config: Arc::new(ResponsePayload {
+                                            encoding: Arc::new(Some("gzip".to_string())),
+                                            data: Arc::from(Bytes::from(compressed)),
+                                        }),
+                                        lcut: lcut.unwrap_or(0),
                                     }))
                                 }
-                                false => Some(Arc::new(ResponsePayload {
-                                    encoding: Arc::new(None),
-                                    data: Arc::from(Bytes::from(data)),
+                                false => Some(Arc::new(ConfigSpecForCompany {
+                                    config: Arc::new(ResponsePayload {
+                                        encoding: Arc::new(None),
+                                        data: Arc::from(Bytes::from(data)),
+                                    }),
+                                    lcut: lcut.unwrap_or(0),
                                 })),
                             }
                         }
@@ -310,7 +324,7 @@ impl RedisCache {
                         }
                     };
 
-                    if should_update {
+                    if !request_context.use_lcut || should_update {
                         // Only decompress before writing for legacy use case
                         let data_to_write = match request_context.use_gzip
                             && self.double_write_cache_for_legacy_key

@@ -101,7 +101,7 @@ impl AuthorizedRequestContext {
             normalized_path.push('/');
         }
 
-        let use_lcut = normalized_path.ends_with("download_config_specs");
+        let use_lcut = normalized_path.contains("download_config_specs");
         AuthorizedRequestContext {
             sdk_key,
             path: normalized_path,

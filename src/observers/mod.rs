@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 
 use crate::{
-    datastore::data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
+    datastore::{
+        config_spec_store::ConfigSpecForCompany,
+        data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
+    },
     servers::authorized_request_context::AuthorizedRequestContext,
 };
 
@@ -26,7 +29,7 @@ pub trait HttpDataProviderObserverTrait {
     async fn get(
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
-    ) -> Option<Arc<ResponsePayload>>;
+    ) -> Option<Arc<ConfigSpecForCompany>>;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
