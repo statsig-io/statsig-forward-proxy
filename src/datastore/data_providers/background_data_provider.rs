@@ -1,5 +1,6 @@
 use crate::datastore::sdk_key_store::SdkKeyStore;
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
+use crate::utils::compress_encoder::CompressionEncoder;
 use crate::GRACEFUL_SHUTDOWN_TOKEN;
 
 use super::http_data_provider::ResponsePayload;
@@ -237,7 +238,7 @@ impl BackgroundDataProvider {
                         request_context,
                         lcut,
                         &(Arc::new(ResponsePayload {
-                            encoding: Arc::new(None),
+                            encoding: Arc::new(CompressionEncoder::PlainText),
                             data: Arc::new(Bytes::new()),
                         })),
                     )

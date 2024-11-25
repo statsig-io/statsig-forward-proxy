@@ -276,7 +276,7 @@ These allow you to ensure:
 - the proxy is getting updates
 - the proxy is receiving timely updates
 
-### What does this mean? [sfp] Dropping event... Buffer limit hit...
+### What does this mean? [SFP] Dropping event... Buffer limit hit...
 
 This log is emitted due to the high volume of events being generated. This is directly proportional to QPS your service is receiving.
 

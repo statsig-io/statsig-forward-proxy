@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use super::request_builder::RequestBuilderTrait;
@@ -6,12 +7,13 @@ use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{proxy_event_observer::ProxyEventObserver, ProxyEvent, ProxyEventType};
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
+use crate::utils::compress_encoder::CompressionEncoder;
 use bytes::Bytes;
 use reqwest::header::HeaderMap;
 
 #[derive(Debug)]
 pub struct ResponsePayload {
-    pub encoding: Arc<Option<String>>,
+    pub encoding: Arc<CompressionEncoder>,
     pub data: Arc<Bytes>,
 }
 
@@ -184,13 +186,18 @@ impl HttpDataProvider {
 
     async fn handle_success(
         &self,
-        result: (Option<String>, Bytes),
+        (encoding_str, data): (Option<String>, Bytes),
         since_time: u64,
         start_time: Instant,
         request_context: &Arc<AuthorizedRequestContext>,
     ) -> DataProviderResult {
         let duration = start_time.elapsed();
         let ms = duration.as_millis() as i64;
+        let encoding = match encoding_str {
+            Some(encoding_unwrapped) => CompressionEncoder::from_str(&encoding_unwrapped)
+                .unwrap_or(CompressionEncoder::PlainText),
+            None => CompressionEncoder::PlainText,
+        };
 
         ProxyEventObserver::publish_event(
             ProxyEvent::new_with_rc(ProxyEventType::HttpDataProviderGotData, request_context)
@@ -205,8 +212,8 @@ impl HttpDataProvider {
             result: DataProviderRequestResult::DataAvailable,
             data: Some((
                 Arc::new(ResponsePayload {
-                    encoding: Arc::from(result.0),
-                    data: Arc::from(result.1),
+                    encoding: Arc::from(encoding),
+                    data: Arc::from(data),
                 }),
                 since_time,
             )),

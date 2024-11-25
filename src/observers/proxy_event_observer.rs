@@ -31,6 +31,10 @@ impl Default for ProxyEventObserver {
 
 impl ProxyEventObserver {
     pub fn new() -> Self {
+        if let Some(size) = CONFIG.event_channel_size {
+            println!("[SFP] EVENT_CHANNEL_SIZE is overriden to {}. This can cause higher memory usage due to pre-allocation of channel memory.", size);
+        }
+
         let (tx, _rx) = broadcast::channel(CONFIG.event_channel_size.unwrap_or(100000));
         ProxyEventObserver {
             sender: Arc::new(tx),
@@ -47,12 +51,12 @@ impl ProxyEventObserver {
                             observer.handle_event(&event).await;
                         },
                         Err(RecvError::Closed) => {
-                            eprintln!("[sfp] event writer dropped... removing reader...");
+                            eprintln!("[SFP] event writer dropped... removing reader...");
                             break;
                         },
                         Err(RecvError::Lagged(frames)) => {
                             eprintln!(
-                                "[sfp] event writer lagging by {} messages. Consider increasing EVENT_CHANNEL_SIZE.",
+                                "[SFP] event writer lagging by {} messages. Consider increasing EVENT_CHANNEL_SIZE.",
                                 frames
                             );
                         },
@@ -64,7 +68,7 @@ impl ProxyEventObserver {
 
     pub fn publish_event(event: ProxyEvent) {
         if let Err(e) = PROXY_EVENT_OBSERVER.sender.send(Arc::new(event)) {
-            eprintln!("[sfp] Dropping event... Buffer limit hit... {}", e);
+            eprintln!("[SFP] Dropping event... Buffer limit hit... {}", e);
         }
     }
 }
