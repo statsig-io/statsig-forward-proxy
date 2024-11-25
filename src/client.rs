@@ -31,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .tls_config(tls)?
         .connect()
         .await?;
+    let sdk_key = std::env::var("STATSIG_SERVER_SDK_KEY").unwrap().to_string();
 
     let mut client = StatsigForwardProxyClient::new(channel).max_decoding_message_size(20870203);
 
@@ -38,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for version in 0..3 {
         let request = tonic::Request::new(ConfigSpecRequest {
             since_time: Some(1234),
-            sdk_key: "secret-1234".into(),
+            sdk_key: sdk_key.clone(),
             version: Some(version),
         });
         let response: tonic::Response<statsig_forward_proxy::ConfigSpecResponse> =
@@ -56,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Streaming
     let request = tonic::Request::new(ConfigSpecRequest {
         since_time: Some(1234),
-        sdk_key: "secret-1234".into(),
+        sdk_key: sdk_key.clone(),
         version: Some(2),
     });
     let response = client.stream_config_spec(request).await?;

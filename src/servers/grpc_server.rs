@@ -6,7 +6,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 
 use crate::datastore::config_spec_store::ConfigSpecStore;
-
 use crate::datastore::{self};
 use crate::observers::http_data_provider_observer::HttpDataProviderObserver;
 use crate::observers::proxy_event_observer::ProxyEventObserver;
@@ -14,6 +13,7 @@ use crate::observers::OperationType;
 use crate::observers::{EventStat, HttpDataProviderObserverTrait};
 use crate::observers::{ProxyEvent, ProxyEventType};
 use crate::servers::streaming_channel::StreamingChannel;
+use crate::utils::compress_encoder::CompressionEncoder;
 use crate::Cli;
 use statsig_forward_proxy::statsig_forward_proxy_server::{
     StatsigForwardProxy, StatsigForwardProxyServer,
@@ -28,11 +28,14 @@ use std::sync::Arc;
 
 use super::authorized_request_context::AuthorizedRequestContextCache;
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
+use crate::GRACEFUL_SHUTDOWN_TOKEN;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod statsig_forward_proxy {
     tonic::include_proto!("statsig_forward_proxy");
 }
 
+static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone)]
 pub struct StatsigForwardProxyServerImpl {
     config_spec_store: Arc<datastore::config_spec_store::ConfigSpecStore>,
@@ -41,7 +44,6 @@ pub struct StatsigForwardProxyServerImpl {
         Arc<RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>>,
     rc_cache: Arc<AuthorizedRequestContextCache>,
 }
-
 impl StatsigForwardProxyServerImpl {
     fn new(
         config_spec_store: Arc<ConfigSpecStore>,
@@ -93,7 +95,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                         "/v{}/download_config_specs/",
                         StatsigForwardProxyServerImpl::get_api_version_from_request(&request)
                     ),
-                    false, /* use_gzip */
+                    CompressionEncoder::PlainText,
                 ),
                 request.get_ref().since_time.unwrap_or(0),
             )
@@ -124,7 +126,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         let request_context = self.rc_cache.get_or_insert(
             sdk_key,
             format!("/v{}/download_config_specs/", api_version,),
-            false, /* use_gzip */
+            CompressionEncoder::PlainText,
         );
 
         let (tx, rx) = mpsc::channel(1);
@@ -166,6 +168,8 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
 
         // After initial response, then start listening for updates
         let ubc_ref = Arc::clone(&self.update_broadcast_cache);
+        let no_update = Arc::clone(&self.config_spec_store.no_update_config);
+        let mut latest_lcut = init_value.last_updated;
         rocket::tokio::spawn(async move {
             tx.send(Ok(init_value)).await.ok();
             ProxyEventObserver::publish_event(
@@ -178,38 +182,46 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                     value: 1,
                 }),
             );
+            CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
 
             loop {
-                match rc.recv().await {
-                    Ok(maybe_csr) => match maybe_csr {
-                        Some((data, lcut)) => match tx
-                            .send(Ok(ConfigSpecResponse {
-                                spec: unsafe { String::from_utf8_unchecked(data.data.to_vec()) },
-                                last_updated: lcut,
-                            }))
-                            .await
-                        {
-                            Ok(_) => {
-                                ProxyEventObserver::publish_event(
-                                    ProxyEvent::new_with_rc(
-                                        ProxyEventType::GrpcStreamingStreamedResponse,
-                                        &request_context,
-                                    )
-                                    .with_stat(EventStat {
-                                        operation_type: OperationType::IncrByValue,
-                                        value: 1,
-                                    }),
-                                );
+                match tokio::time::timeout(tokio::time::Duration::from_secs(60), rc.recv()).await {
+                    Ok(Ok(maybe_csr)) => {
+                        match maybe_csr {
+                            Some((data, lcut)) => {
+                                latest_lcut = lcut;
+                                match tx
+                                    .send(Ok(ConfigSpecResponse {
+                                        spec: unsafe {
+                                            String::from_utf8_unchecked(data.data.to_vec())
+                                        },
+                                        last_updated: lcut,
+                                    }))
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        ProxyEventObserver::publish_event(
+                                            ProxyEvent::new_with_rc(
+                                                ProxyEventType::GrpcStreamingStreamedResponse,
+                                                &request_context,
+                                            )
+                                            .with_stat(EventStat {
+                                                operation_type: OperationType::IncrByValue,
+                                                value: 1,
+                                            }),
+                                        );
+                                    }
+                                    Err(_e) => {
+                                        break;
+                                    }
+                                }
                             }
-                            Err(_e) => {
+                            None => {
                                 break;
                             }
-                        },
-                        None => {
-                            break;
                         }
-                    },
-                    Err(e) => {
+                    }
+                    Ok(Err(e)) => {
                         eprintln!("Error on broadcast receiver: {:?}", e);
                         rc = ubc_ref
                             .read()
@@ -221,9 +233,37 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                             .await
                             .subscribe();
                     }
+                    Err(_) => {
+                        match tx
+                            .send(Ok(ConfigSpecResponse {
+                                spec: unsafe {
+                                    String::from_utf8_unchecked(no_update.data.to_vec())
+                                },
+                                last_updated: latest_lcut,
+                            }))
+                            .await
+                        {
+                            Ok(_) => {
+                                ProxyEventObserver::publish_event(
+                                    ProxyEvent::new_with_rc(
+                                        ProxyEventType::GrpcStreamingHealthcheckSent,
+                                        &request_context,
+                                    )
+                                    .with_stat(EventStat {
+                                        operation_type: OperationType::IncrByValue,
+                                        value: 1,
+                                    }),
+                                );
+                            }
+                            Err(_e) => {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
 
+            CONNECTION_COUNTER.fetch_sub(1, Ordering::SeqCst);
             ProxyEventObserver::publish_event(
                 ProxyEvent::new_with_rc(
                     ProxyEventType::GrpcStreamingStreamDisconnected,
@@ -289,6 +329,29 @@ impl GrpcServer {
             rc_cache,
         );
 
+        // Spawn a background task to log number of active grpc streams
+        tokio::spawn(async {
+            loop {
+                if tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => { false },
+                    _ = GRACEFUL_SHUTDOWN_TOKEN.cancelled() => {
+                        true
+                    },
+                } {
+                    break;
+                }
+
+                ProxyEventObserver::publish_event(
+                    ProxyEvent::new(ProxyEventType::GrpcEstimatedActiveStreams).with_stat(
+                        EventStat {
+                            operation_type: OperationType::Gauge,
+                            value: CONNECTION_COUNTER.load(Ordering::SeqCst) as i64,
+                        },
+                    ),
+                );
+            }
+        });
+
         match (
             cli.x509_server_cert_path.is_some() && cli.x509_server_key_path.is_some(),
             cli.enforce_tls,
@@ -318,7 +381,7 @@ impl GrpcServer {
                 let http_server =
                     Self::create_http_server(sfp_server, http_addr, update_broadcast_cache.clone());
                 println!(
-                    "GrpcServer listening on {} (HTTPS) and {} (HTTP)",
+                    "[SFP] GrpcServer listening on {} (HTTPS) and {} (HTTP)",
                     https_addr, http_addr
                 );
 

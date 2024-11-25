@@ -13,10 +13,12 @@ use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{ProxyEvent, ProxyEventType};
 use crate::servers::http_apis;
+use crate::utils::compress_encoder::CompressionEncoder;
 use crate::Cli;
 use bytes::Bytes;
 
 use cached::proc_macro::once;
+
 use rocket::fairing::AdHoc;
 
 use rocket::http::ContentType;
@@ -45,7 +47,7 @@ use lazy_static::lazy_static;
 
 lazy_static! {
     static ref UNAUTHORIZED_RESPONSE: Arc<ResponsePayload> = Arc::new(ResponsePayload {
-        encoding: Arc::new(None),
+        encoding: Arc::new(CompressionEncoder::PlainText),
         data: Arc::from(Bytes::from("Unauthorized"))
     });
 }
@@ -132,7 +134,7 @@ async fn get_download_config_specs(
         .await
     {
         Some(data) => {
-            if data.config.encoding.as_deref() == Some("gzip") {
+            if *data.config.encoding == CompressionEncoder::Gzip {
                 RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut)
             } else {
                 RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut)
@@ -160,7 +162,7 @@ async fn post_download_config_specs(
         .await
     {
         Some(data) => {
-            if data.config.encoding.as_deref() == Some("gzip") {
+            if *data.config.encoding == CompressionEncoder::Gzip {
                 RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut)
             } else {
                 RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut)
@@ -172,7 +174,7 @@ async fn post_download_config_specs(
 
 #[once]
 fn log_deprecated_function() {
-    eprintln!("[sfp][Please Remove Use] /v1/get_id_lists is deprecated and will be removed in the next major version.");
+    eprintln!("[SFP][Please Remove Use] /v1/get_id_lists is deprecated and will be removed in the next major version.");
 }
 
 #[post("/get_id_lists")]
@@ -301,10 +303,15 @@ impl HttpServer {
                         .get_one("statsig-api-key")
                         .unwrap_or("no-key-provided")
                         .to_string();
-                    let use_gzip = req
+                    let encoding = if req
                         .headers()
                         .get("Accept-Encoding")
-                        .any(|v| v.to_lowercase().contains("gzip"));
+                        .any(|v| v.to_lowercase().contains("gzip"))
+                    {
+                        CompressionEncoder::Gzip
+                    } else {
+                        CompressionEncoder::PlainText
+                    };
                     let lcut = resp
                         .headers()
                         .get_one("x-since-time")
@@ -316,7 +323,7 @@ impl HttpServer {
 
                     // Spawn a new task to handle logging
                     tokio::spawn(async move {
-                        let request_context = cache.get_or_insert(sdk_key, path, use_gzip);
+                        let request_context = cache.get_or_insert(sdk_key, path, encoding);
 
                         let event = ProxyEvent::new_with_rc(
                             if status_class == StatusClass::Success {

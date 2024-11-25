@@ -4,11 +4,13 @@ use rocket::request::{self, FromRequest, Outcome, Request};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::utils::compress_encoder::CompressionEncoder;
+
 #[derive(Debug)]
 pub struct AuthError;
 
 pub struct AuthorizedRequestContextCache(
-    Arc<RwLock<HashMap<(String, String, bool), Arc<AuthorizedRequestContext>>>>,
+    Arc<RwLock<HashMap<(String, String, CompressionEncoder), Arc<AuthorizedRequestContext>>>>,
 );
 
 impl Default for AuthorizedRequestContextCache {
@@ -26,9 +28,9 @@ impl AuthorizedRequestContextCache {
         &self,
         sdk_key: String,
         path: String,
-        use_gzip: bool,
+        encoding: CompressionEncoder,
     ) -> Arc<AuthorizedRequestContext> {
-        let key = (sdk_key.clone(), path.clone(), use_gzip);
+        let key = (sdk_key.clone(), path.clone(), encoding);
         {
             let read_lock = self.0.read();
             if let Some(context) = read_lock.get(&key) {
@@ -39,7 +41,7 @@ impl AuthorizedRequestContextCache {
         let mut write_lock = self.0.write();
         write_lock
             .entry(key)
-            .or_insert_with(|| Arc::new(AuthorizedRequestContext::new(sdk_key, path, use_gzip)))
+            .or_insert_with(|| Arc::new(AuthorizedRequestContext::new(sdk_key, path, encoding)))
             .clone()
     }
 }
@@ -63,16 +65,21 @@ impl<'r> FromRequest<'r> for AuthorizedRequestContextWrapper {
             .state::<Arc<AuthorizedRequestContextCache>>()
             .unwrap();
 
-        let use_gzip = headers
+        let encoding = if headers
             .get("Accept-Encoding")
-            .any(|v| v.to_lowercase().contains("gzip"));
+            .any(|v| v.to_lowercase().contains("gzip"))
+        {
+            CompressionEncoder::Gzip
+        } else {
+            CompressionEncoder::PlainText
+        };
 
         match headers.get_one("statsig-api-key") {
             Some(sdk_key) => {
                 Outcome::Success(AuthorizedRequestContextWrapper(cache.get_or_insert(
                     sdk_key.to_string(),
                     request.uri().path().to_string(),
-                    use_gzip,
+                    encoding,
                 )))
             }
             None => Outcome::Error((Status::BadRequest, AuthError)),
@@ -85,11 +92,11 @@ pub struct AuthorizedRequestContext {
     pub sdk_key: String,
     pub path: String,
     pub use_lcut: bool,
-    pub use_gzip: bool,
+    pub encoding: CompressionEncoder,
 }
 
 impl AuthorizedRequestContext {
-    pub fn new(sdk_key: String, path: String, use_gzip: bool) -> Self {
+    pub fn new(sdk_key: String, path: String, encoding: CompressionEncoder) -> Self {
         let mut normalized_path = path;
         if normalized_path.ends_with(".json") || normalized_path.ends_with(".js") {
             if let Some(pos) = normalized_path.rfind('/') {
@@ -106,20 +113,20 @@ impl AuthorizedRequestContext {
             sdk_key,
             path: normalized_path,
             use_lcut,
-            use_gzip,
+            encoding,
         }
     }
 }
 
 impl std::fmt::Display for AuthorizedRequestContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}|{}|{}", self.sdk_key, self.path, self.use_gzip)
+        write!(f, "{}|{}|{}", self.sdk_key, self.path, self.encoding)
     }
 }
 
 impl PartialEq for AuthorizedRequestContext {
     fn eq(&self, other: &Self) -> bool {
-        self.sdk_key == other.sdk_key && self.path == other.path && self.use_gzip == other.use_gzip
+        self.sdk_key == other.sdk_key && self.path == other.path && self.encoding == other.encoding
     }
 }
 
@@ -129,6 +136,6 @@ impl std::hash::Hash for AuthorizedRequestContext {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.sdk_key.hash(state);
         self.path.hash(state);
-        self.use_gzip.hash(state);
+        self.encoding.hash(state);
     }
 }

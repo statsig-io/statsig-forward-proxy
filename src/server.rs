@@ -40,6 +40,7 @@ pub mod observers;
 pub mod servers;
 pub mod utils;
 use serde::Deserialize;
+use std::env;
 
 lazy_static! {
     pub static ref GRACEFUL_SHUTDOWN_TOKEN: CancellationToken = CancellationToken::new();
@@ -126,13 +127,6 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
     let enable_statsig = match &config.statsig_server_sdk_key {
         Some(server_sdk_key) => {
             let opts = StatsigOptions {
-                // If we are using HTTP server, we can actually be self referential
-                // to decide whether or not to enable GCP Profiling
-                api_for_download_config_specs: match cli.mode {
-                    TransportMode::Grpc => "https://api.statsigcdn.com/v1".to_string(),
-                    TransportMode::Http => "http://127.0.0.1:8001/v1".to_string(),
-                    TransportMode::GrpcAndHttp => "http://127.0.0.1:8001/v1".to_string(),
-                },
                 disable_user_agent_support: true,
                 ..StatsigOptions::default()
             };
@@ -263,10 +257,15 @@ async fn create_id_list_store(
 
 #[rocket::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env::set_var("RUST_BACKTRACE", "1");
+
     let cli = Cli::parse();
     let overrides = envy::from_env::<ConfigurationAndOverrides>().expect("Envy Error");
+
+    println!("[SFP] Checking to initialize Statsig SDK and Profiling...");
     try_initialize_statsig_sdk_and_profiling(&cli, &overrides).await;
 
+    println!("[SFP] Initializing event observers...");
     if cli.datadog_logging || cli.statsd_logging || cli.statsig_logging {
         let stats_logger = Arc::new(
             stats_logger::StatsLogger::new(
@@ -282,6 +281,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let debug_logger = Arc::new(debug_logger::DebugLogger::new());
         ProxyEventObserver::add_observer(debug_logger).await;
     }
+
+    println!("[SFP] Initializing data providers...");
     let shared_http_data_provider = Arc::new(http_data_provider::HttpDataProvider {});
     let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
     let background_data_provider = Arc::new(background_data_provider::BackgroundDataProvider::new(
@@ -292,7 +293,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.clear_datastore_on_unauthorized,
     ));
     let cache_uuid = Uuid::new_v4().to_string();
+
+    println!("[SFP] Initializing caches...");
     let redis_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
+        CacheMode::Redis => Arc::new(
+            redis_cache::RedisCache::new(
+                "statsig".to_string(),
+                cli.redis_leader_key_ttl,
+                &cache_uuid,
+                true, /* check lcut */
+                cli.redis_cache_ttl_in_s,
+                cli.double_write_cache_for_legacy_key,
+            )
+            .await,
+        ),
+        CacheMode::Disabled => Arc::new(disabled_cache::DisabledCache::default()),
+    };
+    let idlist_redis_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> = match cli.cache {
         CacheMode::Redis => Arc::new(
             redis_cache::RedisCache::new(
                 "statsig".to_string(),
@@ -321,10 +338,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cli,
         Arc::clone(&background_data_provider),
         Arc::clone(&idlist_observer),
-        &redis_cache,
+        &idlist_redis_cache,
         &sdk_key_store,
     )
     .await;
+
+    println!("[SFP] Starting background thread...");
     background_data_provider.start_background_thread().await;
     let rc_cache = Arc::new(AuthorizedRequestContextCache::new());
     // Default buffer size is 20000 messages
@@ -335,6 +354,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .expect("We must have an http client");
     let log_event_store = create_log_event_store(http_client.clone(), &overrides).await;
+
+    println!("[SFP] Initializing Servers...");
     match cli.mode {
         TransportMode::Grpc => {
             servers::grpc_server::GrpcServer::start_server(

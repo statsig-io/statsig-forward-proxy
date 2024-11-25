@@ -8,6 +8,7 @@ use crate::observers::{
     EventStat, HttpDataProviderObserverTrait, OperationType, ProxyEvent, ProxyEventType,
 };
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
+use crate::utils::compress_encoder::CompressionEncoder;
 use bytes::Bytes;
 
 use chrono::Utc;
@@ -26,7 +27,7 @@ pub struct ConfigSpecStore {
     store: Arc<DashMap<Arc<AuthorizedRequestContext>, Arc<ConfigSpecForCompany>>>,
     sdk_key_store: Arc<SdkKeyStore>,
     background_data_provider: Arc<BackgroundDataProvider>,
-    no_update_config: Arc<ResponsePayload>,
+    pub no_update_config: Arc<ResponsePayload>,
 }
 
 use async_trait::async_trait;
@@ -43,21 +44,19 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
         lcut: u64,
         data: &Arc<ResponsePayload>,
     ) {
-        let should_insert = result == &DataProviderRequestResult::Error
-            || (result == &DataProviderRequestResult::DataAvailable
-                && !self.store.contains_key(request_context));
+        if result == &DataProviderRequestResult::Error
+            || result == &DataProviderRequestResult::DataAvailable
+        {
+            if !self.store.contains_key(request_context) {
+                let rc = request_context.clone();
+                let new_data = Arc::new(ConfigSpecForCompany {
+                    lcut,
+                    config: data.clone(),
+                });
+                self.store.insert(rc, new_data);
+                return;
+            }
 
-        if should_insert {
-            let rc = request_context.clone();
-            let new_data = Arc::new(ConfigSpecForCompany {
-                lcut,
-                config: data.clone(),
-            });
-            self.store.insert(rc, new_data);
-            return;
-        }
-
-        if result == &DataProviderRequestResult::DataAvailable {
             let stored_lcut = self
                 .store
                 .get(request_context)
@@ -110,7 +109,7 @@ impl ConfigSpecStore {
             sdk_key_store,
             background_data_provider,
             no_update_config: Arc::new(ResponsePayload {
-                encoding: Arc::new(None),
+                encoding: Arc::new(CompressionEncoder::PlainText),
                 data: Arc::new(Bytes::from("{\"has_updates\":false}".to_string())),
             }),
         }

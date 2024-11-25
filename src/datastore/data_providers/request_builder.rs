@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use cached::proc_macro::once;
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
@@ -10,6 +11,7 @@ use crate::{
         http_data_provider_observer::HttpDataProviderObserver, HttpDataProviderObserverTrait,
     },
     servers::authorized_request_context::AuthorizedRequestContext,
+    utils::compress_encoder::CompressionEncoder,
 };
 
 use once_cell::sync::Lazy;
@@ -99,6 +101,11 @@ impl DcsRequestBuilder {
     }
 }
 
+#[once]
+fn get_package_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[async_trait]
 impl RequestBuilderTrait for DcsRequestBuilder {
     async fn make_request(
@@ -118,20 +125,19 @@ impl RequestBuilderTrait for DcsRequestBuilder {
             ),
         };
 
-        if request_context.use_gzip {
-            http_client
-                .get(url)
-                .header(reqwest::header::ACCEPT_ENCODING, "gzip")
-                .timeout(Duration::from_secs(30))
-                .send()
-                .await
-        } else {
-            http_client
-                .get(url)
-                .timeout(Duration::from_secs(30))
-                .send()
-                .await
+        let mut request = http_client
+            .get(url)
+            .header("x-sfp-version", get_package_version())
+            .timeout(Duration::from_secs(30));
+
+        if request_context.encoding != CompressionEncoder::PlainText {
+            request = request.header(
+                reqwest::header::ACCEPT_ENCODING,
+                request_context.encoding.to_string(),
+            );
         }
+
+        request.send().await
     }
 
     async fn is_an_update(&self, body: &str, _sdk_key: &str) -> bool {
@@ -183,7 +189,9 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
     ) -> Result<reqwest::Response, reqwest::Error> {
         match http_client
             .post("https://api.statsig.com/v1/get_id_lists".to_string())
+            .header("x-sfp-version", get_package_version())
             .header("statsig-api-key", request_context.sdk_key.clone())
+            .timeout(Duration::from_secs(30))
             .body("{}".to_string())
             .send()
             .await

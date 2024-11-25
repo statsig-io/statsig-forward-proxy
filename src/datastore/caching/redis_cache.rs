@@ -1,12 +1,12 @@
+use base64::{prelude::BASE64_STANDARD, Engine};
+use bb8_redis::{redis::AsyncCommands, RedisConnectionManager};
+use parking_lot::RwLock;
+use redis::aio::MultiplexedConnection;
 use std::{
     collections::HashMap,
     io::{Cursor, Read, Write},
     sync::Arc,
 };
-
-use bb8_redis::{redis::AsyncCommands, RedisConnectionManager};
-use parking_lot::RwLock;
-use redis::aio::MultiplexedConnection;
 
 use crate::{
     datastore::{
@@ -18,6 +18,7 @@ use crate::{
         ProxyEventType,
     },
     servers::authorized_request_context::AuthorizedRequestContext,
+    utils::compress_encoder::CompressionEncoder,
 };
 
 use crate::observers::EventStat;
@@ -81,7 +82,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                 format!(
                     "{}::{}",
                     self.key_prefix,
-                    self.hash_key(&request_context.sdk_key).await
+                    self.hash_key(&request_context.sdk_key, false).await
                 ),
                 result,
                 request_context,
@@ -127,14 +128,13 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                     ProxyEventType::RedisCacheReadSucceed,
                                     request_context,
                                 )
+                                .with_lcut(lcut.unwrap_or(0))
                                 .with_stat(EventStat {
                                     operation_type: OperationType::IncrByValue,
                                     value: 1,
                                 }),
                             );
-                            // Only decompress before writing for legacy use case
-                            match request_context.use_gzip && self.double_write_cache_for_legacy_key
-                            {
+                            match request_context.encoding == CompressionEncoder::Gzip {
                                 true => {
                                     let mut compressed = Vec::new();
                                     let mut encoder =
@@ -147,9 +147,13 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                         eprintln!("Failed to gzip data from redis: {:?}", e);
                                         return None;
                                     }
+                                    if compressed.is_empty() {
+                                        eprintln!("Compressed data from redis is empty.");
+                                        return None;
+                                    }
                                     Some(Arc::new(ConfigSpecForCompany {
                                         config: Arc::new(ResponsePayload {
-                                            encoding: Arc::new(Some("gzip".to_string())),
+                                            encoding: Arc::new(CompressionEncoder::Gzip),
                                             data: Arc::from(Bytes::from(compressed)),
                                         }),
                                         lcut: lcut.unwrap_or(0),
@@ -157,7 +161,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                 }
                                 false => Some(Arc::new(ConfigSpecForCompany {
                                     config: Arc::new(ResponsePayload {
-                                        encoding: Arc::new(None),
+                                        encoding: Arc::new(CompressionEncoder::PlainText),
                                         data: Arc::from(Bytes::from(data)),
                                     }),
                                     lcut: lcut.unwrap_or(0),
@@ -243,15 +247,22 @@ impl RedisCache {
     }
 
     async fn get_redis_key(&self, request_context: &Arc<AuthorizedRequestContext>) -> String {
+        // Key should match SDK
+        // Key should look like "statsg|v1/download_cofig_specs/{compression_encoding}|{hashed(key)}"
+        // For compression encoding, we only write plain text until we added support to decompress from sdk side
         format!(
             "statsig|{}|{}|{}",
-            request_context.path,
-            request_context.use_gzip,
-            self.hash_key(&request_context.sdk_key).await
+            Self::sanitize_path(&request_context.path),
+            CompressionEncoder::PlainText,
+            self.hash_key(&request_context.sdk_key, true).await
         )
     }
 
-    async fn hash_key(&self, key: &str) -> String {
+    fn sanitize_path(path: &str) -> String {
+        path.trim_end_matches('/').to_string()
+    }
+
+    async fn hash_key(&self, key: &str, use_base64_encode: bool) -> String {
         if self.hash_cache.read().contains_key(key) {
             return self
                 .hash_cache
@@ -263,7 +274,12 @@ impl RedisCache {
 
         // Hash key so that we aren't loading a bunch of sdk keys
         // into memory
-        let hashed_key = format!("{:x}", Sha256::digest(key));
+        // TODO: Move hash into a util
+        let hashed_key = if use_base64_encode {
+            BASE64_STANDARD.encode(Sha256::digest(key)).to_string()
+        } else {
+            format!("{:x}", Sha256::digest(key))
+        };
         self.hash_cache
             .write()
             .insert(key.to_string(), hashed_key.clone());
@@ -325,10 +341,8 @@ impl RedisCache {
                     };
 
                     if !request_context.use_lcut || should_update {
-                        // Only decompress before writing for legacy use case
-                        let data_to_write = match request_context.use_gzip
-                            && self.double_write_cache_for_legacy_key
-                        {
+                        // We only store uncompressed data to redis for right now
+                        let data_to_write = match *data.encoding == CompressionEncoder::Gzip {
                             true => {
                                 let mut decoder = GzDecoder::new(Cursor::new(&**data.data));
                                 let mut decompressed = Vec::new();
@@ -340,6 +354,7 @@ impl RedisCache {
                                                 ProxyEventType::RedisCacheWriteFailed,
                                                 request_context,
                                             )
+                                            .with_lcut(lcut)
                                             .with_stat(EventStat {
                                                 operation_type: OperationType::IncrByValue,
                                                 value: 1,
@@ -369,6 +384,7 @@ impl RedisCache {
                                         ProxyEventType::RedisCacheWriteSucceed,
                                         request_context,
                                     )
+                                    .with_lcut(lcut)
                                     .with_stat(EventStat {
                                         operation_type: OperationType::IncrByValue,
                                         value: 1,
@@ -381,6 +397,7 @@ impl RedisCache {
                                         ProxyEventType::RedisCacheWriteFailed,
                                         request_context,
                                     )
+                                    .with_lcut(lcut)
                                     .with_stat(EventStat {
                                         operation_type: OperationType::IncrByValue,
                                         value: 1,
@@ -395,6 +412,7 @@ impl RedisCache {
                                 ProxyEventType::RedisCacheWriteSkipped,
                                 request_context,
                             )
+                            .with_lcut(lcut)
                             .with_stat(EventStat {
                                 operation_type: OperationType::IncrByValue,
                                 value: 1,
@@ -408,6 +426,7 @@ impl RedisCache {
                             ProxyEventType::RedisCacheWriteFailed,
                             request_context,
                         )
+                        .with_lcut(lcut)
                         .with_stat(EventStat {
                             operation_type: OperationType::IncrByValue,
                             value: 1,

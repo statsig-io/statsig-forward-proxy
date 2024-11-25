@@ -6,7 +6,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use http_data_provider::ResponsePayload;
 
-use crate::servers::authorized_request_context::AuthorizedRequestContext;
+use crate::{
+    servers::authorized_request_context::AuthorizedRequestContext,
+    // utils::compress_encoder::CompressionEncoder,
+};
 
 use self::request_builder::RequestBuilderTrait;
 #[async_trait]
@@ -31,5 +34,6 @@ pub enum DataProviderRequestResult {
 #[derive(Debug)]
 pub struct DataProviderResult {
     result: DataProviderRequestResult,
+    // encoding: CompressionEncoder,
     data: Option<(Arc<ResponsePayload>, u64)>,
 }
