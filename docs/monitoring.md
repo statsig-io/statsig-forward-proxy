@@ -137,7 +137,7 @@ We emit a number of events that allow you to monitor and ensure that the forward
 
 - **Description**: If using redis caching, indicates a successful write of the latest configuration to redis.
 - **Event Unit Type**: Count
-- **Useful Dimensions**: path, sdk_key
+- **Useful Dimensions**: path, sdk_key, lcut
 - **How to Interpret**:
   - Sum total data points to get volume
 - **Is it working?**: This should be one-to-one with HttpDataProviderGotData.
@@ -146,7 +146,7 @@ We emit a number of events that allow you to monitor and ensure that the forward
 
 - **Description**: If using redis caching, indicates a failed write of the latest configuration to redis.
 - **Event Unit Type**: Count
-- **Useful Dimensions**: path, sdk_key
+- **Useful Dimensions**: path, sdk_key, lcut
 - **How to Interpret**:
   - Sum total data points to get volume
 - **Is it working?**: If this is happening consistantly, please validate that your redis instance/cluster is operating normally.
@@ -155,7 +155,7 @@ We emit a number of events that allow you to monitor and ensure that the forward
 
 - **Description**: If using redis caching, if a request to our CDN/Origin fails, it will check redis to see if there is a newer payload.
 - **Event Unit Type**: Count
-- **Useful Dimensions**: path, sdk_key
+- **Useful Dimensions**: path, sdk_key, lcut
 - **How to Interpret**:
   - Sum total data points to get volume
 - **Is it working?**: If this is happening consistantly, please validate that your redis instance/cluster is operating normally.
@@ -182,7 +182,7 @@ We emit a number of events that allow you to monitor and ensure that the forward
 
 - **Description**: If using redis caching, we ensure only one proxy instance is writing at any given time. This allows to you check which proxy instances are not doing RedisCacheWriteSucceed.
 - **Event Unit Type**: Count
-- **Useful Dimensions**: path, sdk_key
+- **Useful Dimensions**: path, sdk_key, lcut
 - **How to Interpret**:
   - Sum total data points to get volume
 - **Is it working?**: This should be the inverse of RedisCacheWriteSucceed, such that the sum of the two metrics is the total number of pods when grouping by path + sdk_key.
@@ -243,6 +243,15 @@ We emit a number of events that allow you to monitor and ensure that the forward
 - **How to Interpret**:
   - Sum total data points to get volume
 - **Is it working?**: This should roughly match with pod shutdown, however, transient issues can occur on the client application level/networking stack that can cause slightly higher volume.
+
+### GrpcEstimatedActiveStreams
+
+- **Description**: Estimated number of gRPC streams that are active.
+- **Event Unit Type**: Gauge
+- **Useful Dimensions**: sdk_key
+- **How to Interpret**:
+  - Sum of latest data point across pods is the number of active connections
+- **Is it working?**: If this is hitting the number of maximum grpc connections, or not incrementing, you will either be dropping connections at SFP or not able to connect at all.
 
 ### StreamingChannelGotNewData
 
