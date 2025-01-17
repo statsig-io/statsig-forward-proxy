@@ -92,6 +92,18 @@ If you are using additionaly dependencies such as, redis or datadog, take a look
 in order to get an idea of what environment variables you may need to set to ensure those dependencies are
 configured correctly.
 
+# Nginx Caching
+
+We leverage nginx to leverage it as a passthrough proxy with request queueing, per recommendation of the [rocket framework](https://rocket.rs/guide/v0.5/deploying/#overview).
+
+In addition to this, we leverage it as a cache. To configure this cache, we expose two environment variables:
+- PROXY_CACHE_PATH_CONFIGURATION: The directory at which to store cached data, by default, is /dev/shm
+- PROXY_CACHE_MAX_SIZE_IN_MB: The size of the nginx cache, which by default is 1024mb
+
+Note: In most cases, the default size limit for /dev/shm is 64mb, in our next major version release, we plan to align the default value for PROXY_CACHE_MAX_SIZE_IN_MB to this. In most scenarios, this should not matter, however, if your config spec payload is multiple MB, this is something to be aware of.
+
+By default, we store all error logs at */var/log/nginx/error.log* incase any debugging is needed.
+
 # Recommended Methods of Deployment
 
 We recommend two main modes of deploying the statsig forward proxy:

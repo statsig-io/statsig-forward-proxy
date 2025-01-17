@@ -10,7 +10,7 @@ pub mod statsig_forward_proxy {
     tonic::include_proto!("statsig_forward_proxy");
 }
 
-fn last_500_char(spec: &String) -> String {
+fn last_500_char(spec: &str) -> String {
     // only print last 500 characters
     let len = spec.len();
     let start = if len > 500 { len - 500 } else { 0 };

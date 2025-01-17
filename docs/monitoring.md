@@ -274,6 +274,22 @@ We emit a number of events that allow you to monitor and ensure that the forward
   - lcut, also known as last config update time, lets you know the timestamp of when the served configuration was generated
 - **Is it working?**: This should match one-to-one with your project configuration updates. P99 is expected to be around 30s after taking into account all our caching layers.
 
+### NginxCacheBytesUsed
+
+- **Description**: Represents the amount of data currently stored in the nginx cache
+- **Event Unit Type**: bytes
+- **How to Interpret**:
+  - Look at the latest value that is emitted per pod
+- **Is it working?**: Ensure that it is always lower than NginxCacheBytesLimit with some buffer
+
+### NginxCacheBytesLimit
+
+- **Description**: Represents the amount of data that the nginx cache is configured to store
+- **Event Unit Type**: bytes
+- **How to Interpret**:
+  - Look at the latest value that is emitted per pod
+- **Is it working?**: Ensure that it is always greater than NginxCacheBytesUsed with some buffer
+
 ## Common Issues and Questions
 
 ### What are the most important metrics to monitor?

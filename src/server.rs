@@ -16,6 +16,7 @@ use datastore::{
 };
 use futures::join;
 use loggers::debug_logger;
+use loggers::nginx_cache_monitor;
 use loggers::stats_logger;
 use observers::http_data_provider_observer::HttpDataProviderObserver;
 use tokio_util::sync::CancellationToken;
@@ -354,6 +355,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .expect("We must have an http client");
     let log_event_store = create_log_event_store(http_client.clone(), &overrides).await;
+
+    nginx_cache_monitor::NginxCacheMonitor::start_monitoring().await;
 
     println!("[SFP] Initializing Servers...");
     match cli.mode {

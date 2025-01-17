@@ -173,11 +173,8 @@ impl LogEventStore {
             .and_then(|dt| dt.timestamp_millis().try_into().ok())
             .or(event.time);
 
-        match time_millis {
-            Some(time) => {
-                write!(&mut exposure_key, ";t{}", time).expect("Writing should never fail")
-            }
-            None => {}
+        if let Some(time) = time_millis {
+            write!(&mut exposure_key, ";t{}", time).expect("Writing should never fail")
         }
 
         Some(exposure_key)

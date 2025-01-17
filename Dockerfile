@@ -1,4 +1,4 @@
-FROM amd64/rust:1.75-alpine3.19 as builder
+FROM amd64/rust:1.83-alpine3.19 as builder
 
 RUN apk update && apk add git curl build-base autoconf automake libtool pkgconfig libressl-dev musl-dev gcc libc-dev g++ libffi-dev
 
@@ -28,9 +28,6 @@ RUN cargo build --release
 
 FROM nginx:alpine
 
-# Copy Nginx configuration
-COPY nginx.conf /etc/nginx/nginx.conf
-
 # Copy the build artifact from the build stage
 COPY --from=builder /statsig_forward_proxy/target/release/server /usr/local/bin/statsig_forward_proxy
 
@@ -47,6 +44,8 @@ ENV ROCKET_ENV=prod
 # Expose port 8001 for Nginx and 8000 for the proxy
 EXPOSE 8000 8001
 
+# Copy Nginx configuration
+COPY nginx.conf.template /nginx.conf.template
 # Create an entrypoint script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

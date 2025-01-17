@@ -46,12 +46,11 @@ pub struct LogEvent {
 
 impl LogEvent {
     pub fn get_metadata(&self, key: &str) -> String {
-        return self
-            .metadata
+        self.metadata
             .as_ref()
             .and_then(|m| m.get(key))
             .and_then(|v| to_string(v).ok())
-            .unwrap_or("".to_string());
+            .unwrap_or("".to_string())
     }
 }
 

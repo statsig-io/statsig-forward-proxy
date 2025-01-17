@@ -61,6 +61,8 @@ pub enum ProxyEventType {
     UpdateConfigSpecStorePropagationDelayMs,
     LogEventStoreDeduped,
     LogEventStoreDedupeCacheCleared,
+    NginxCacheBytesUsed,
+    NginxCacheBytesLimit,
 }
 
 impl std::fmt::Display for ProxyEventType {
@@ -109,6 +111,8 @@ impl std::fmt::Display for ProxyEventType {
             ProxyEventType::LogEventStoreDedupeCacheCleared => {
                 write!(f, "LogEventStoreDedupeCacheCleared")
             }
+            ProxyEventType::NginxCacheBytesUsed => write!(f, "NginxCacheBytesUsed"),
+            ProxyEventType::NginxCacheBytesLimit => write!(f, "NginxCacheBytesLimit"),
         }
     }
 }
