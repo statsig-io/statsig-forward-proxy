@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::datastore::id_list_store::GetIdListStore;
 use crate::datastore::log_event_store::LogEventStore;
 
+use crate::datastore::shared_dict_config_spec_store::SharedDictConfigSpecStore;
 use crate::datatypes::gzip_data::LoggedBodyJSON;
 use crate::datatypes::log_event::LogEventRequest;
 use crate::datatypes::log_event::LogEventResponse;
@@ -57,6 +58,8 @@ use crate::servers::authorized_request_context::{
     AuthorizedRequestContextCache, AuthorizedRequestContextWrapper,
 };
 
+use super::normalized_path::NormalizedPath;
+
 pub struct TimerStart(pub Option<Instant>);
 
 #[derive(Serialize, Deserialize)]
@@ -89,25 +92,33 @@ where
 }
 
 enum RequestPayloads {
-    Gzipped(Arc<Bytes>, u64),
-    Plain(Arc<Bytes>, u64),
+    Gzipped(Arc<Bytes>, u64, Option<Arc<str>>),
+    Plain(Arc<Bytes>, u64, Option<Arc<str>>),
     Unauthorized(),
 }
 
 impl<'r> Responder<'r, 'static> for RequestPayloads {
     fn respond_to(self, _req: &'r Request) -> Result<Response<'static>, Status> {
         match self {
-            RequestPayloads::Gzipped(data, lcut) => Response::build()
+            RequestPayloads::Gzipped(data, lcut, zstd_dict_id) => Response::build()
                 .status(Status::Ok)
                 .header(ContentType::JSON)
                 .header(rocket::http::Header::new("Content-Encoding", "gzip"))
                 .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
+                .header(rocket::http::Header::new(
+                    "x-compression-dict",
+                    zstd_dict_id.clone().unwrap_or("".into()).to_string(),
+                ))
                 .sized_body(data.len(), Cursor::new(DerefRef(data)))
                 .ok(),
-            RequestPayloads::Plain(data, lcut) => Response::build()
+            RequestPayloads::Plain(data, lcut, zstd_dict_id) => Response::build()
                 .status(Status::Ok)
                 .header(ContentType::JSON)
                 .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
+                .header(rocket::http::Header::new(
+                    "x-compression-dict",
+                    zstd_dict_id.clone().unwrap_or("".into()).to_string(),
+                ))
                 .sized_body(data.len(), Cursor::new(DerefRef(data)))
                 .ok(),
             RequestPayloads::Unauthorized() => Response::build()
@@ -135,9 +146,44 @@ async fn get_download_config_specs(
     {
         Some(data) => {
             if *data.config.encoding == CompressionEncoder::Gzip {
-                RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut)
+                RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut, None)
             } else {
-                RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut)
+                RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut, None)
+            }
+        }
+        None => RequestPayloads::Unauthorized(),
+    }
+}
+
+#[get("/download_config_specs/d/<dict_id>/<sdk_key_file>?<sinceTime>")]
+async fn get_download_config_specs_with_shared_dict(
+    shared_dict_config_spec_store: &State<Arc<SharedDictConfigSpecStore>>,
+    dict_id: &str,
+    #[allow(unused_variables)] sdk_key_file: &str,
+    #[allow(non_snake_case)] sinceTime: Option<u64>,
+    authorized_rc: AuthorizedRequestContextWrapper,
+) -> RequestPayloads {
+    match shared_dict_config_spec_store
+        .get_config_spec(
+            &authorized_rc.inner(),
+            sinceTime.unwrap_or(0),
+            &Some(Arc::from(dict_id.to_string())),
+        )
+        .await
+    {
+        Some(data) => {
+            if *data.config.encoding == CompressionEncoder::Gzip {
+                RequestPayloads::Gzipped(
+                    Arc::clone(&data.config.data),
+                    data.lcut,
+                    data.zstd_dict_id.clone(),
+                )
+            } else {
+                RequestPayloads::Plain(
+                    Arc::clone(&data.config.data),
+                    data.lcut,
+                    data.zstd_dict_id.clone(),
+                )
             }
         }
         None => RequestPayloads::Unauthorized(),
@@ -163,9 +209,9 @@ async fn post_download_config_specs(
     {
         Some(data) => {
             if *data.config.encoding == CompressionEncoder::Gzip {
-                RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut)
+                RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut, None)
             } else {
-                RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut)
+                RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut, None)
             }
         }
         None => RequestPayloads::Unauthorized(),
@@ -185,7 +231,7 @@ async fn post_get_id_lists(
     log_deprecated_function();
 
     match get_id_list_store.get_id_lists(&authorized_rc.inner()).await {
-        Some(data) => RequestPayloads::Plain(Arc::clone(&data.idlists.data), 0),
+        Some(data) => RequestPayloads::Plain(Arc::clone(&data.idlists.data), 0, None),
         None => RequestPayloads::Unauthorized(),
     }
 }
@@ -222,6 +268,7 @@ impl HttpServer {
     pub async fn start_server(
         cli: &Cli,
         config_spec_store: Arc<ConfigSpecStore>,
+        shared_dict_config_spec_store: Arc<SharedDictConfigSpecStore>,
         log_event_store: Arc<LogEventStore>,
         id_list_store: Arc<GetIdListStore>,
         rc_cache: Arc<AuthorizedRequestContextCache>,
@@ -243,9 +290,14 @@ impl HttpServer {
             )
             .mount(
                 "/v2",
-                routes![get_download_config_specs, post_download_config_specs],
+                routes![
+                    get_download_config_specs,
+                    get_download_config_specs_with_shared_dict,
+                    post_download_config_specs,
+                ],
             )
             .manage(config_spec_store)
+            .manage(shared_dict_config_spec_store)
             .manage(log_event_store)
             .manage(id_list_store)
             .manage(rc_cache)
@@ -317,7 +369,11 @@ impl HttpServer {
                         .get_one("x-since-time")
                         .and_then(|v| v.parse::<u64>().ok())
                         .unwrap_or(0);
-                    let path = req.uri().path().to_string();
+                    let zstd_dict_id = resp
+                        .headers()
+                        .get_one("x-compression-dict")
+                        .map(|v| v.to_string());
+                    let path = NormalizedPath::from(req.uri().path().as_str());
                     let status_code = resp.status().code;
                     let status_class = resp.status().class();
 
@@ -335,6 +391,7 @@ impl HttpServer {
                         )
                         .with_status_code(status_code)
                         .with_lcut(lcut)
+                        .with_zstd_dict_id(zstd_dict_id.map(Arc::from))
                         .with_stat(EventStat {
                             operation_type: OperationType::Distribution,
                             value: ms,

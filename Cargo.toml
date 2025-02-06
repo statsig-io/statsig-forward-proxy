@@ -1,6 +1,6 @@
 [package]
 name = "statsig-forward-proxy"
-version = "3.0.1"
+version = "3.1.0"
 edition = "2021"
 rust-version = "1.75.0"
 
@@ -14,7 +14,7 @@ protobuf = "3.5.1"
 prost = "0.13.2"
 rocket = { version = "0.5.1", features = ["json"] }
 tokio = { version = "1.40.0", features = ["full"] }
-reqwest = { version = "0.12.8" }
+reqwest = { version = "0.12.12" }
 futures = "0.3.30"
 envy = "0.4.2"
 serde = { version = "1.0.210", features = ["derive"] }
@@ -24,9 +24,9 @@ bb8-redis = { version = "0.15.0" }
 async-trait = "0.1.82"
 sha2 = "0.10.8"
 lazy_static = "1.5.0"
-dogstatsd = "0.11.1"
-lru = "0.12.4"
-cached = { version = "0.53.1", features = ["proc_macro", "async", "async_tokio_rt_multi_thread"] }
+dogstatsd = "0.12.1"
+lru = "0.13.0"
+cached = { version = "0.54.0", features = ["proc_macro", "async", "async_tokio_rt_multi_thread"] }
 tokio-stream = "0.1.16"
 cloud_profiler_rust = "1.2.2"
 statsig = "1.2.0"
@@ -44,10 +44,11 @@ fxhash = "0.2.1"
 tokio-util = "0.7.12"
 bytes = "1.7.2"
 flate2 = "1.0.34"
+regex = "1.11.1"
 
 
 [build-dependencies]
-tonic-build = "0.11.0"
+tonic-build = "0.12.3"
 
 [[bin]]
 name = "server"

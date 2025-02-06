@@ -4,13 +4,15 @@ use rocket::request::{self, FromRequest, Outcome, Request};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::servers::normalized_path::NormalizedPath;
 use crate::utils::compress_encoder::CompressionEncoder;
 
 #[derive(Debug)]
 pub struct AuthError;
 
+type CacheKey = (String, NormalizedPath, CompressionEncoder);
 pub struct AuthorizedRequestContextCache(
-    Arc<RwLock<HashMap<(String, String, CompressionEncoder), Arc<AuthorizedRequestContext>>>>,
+    Arc<RwLock<HashMap<CacheKey, Arc<AuthorizedRequestContext>>>>,
 );
 
 impl Default for AuthorizedRequestContextCache {
@@ -27,7 +29,7 @@ impl AuthorizedRequestContextCache {
     pub fn get_or_insert(
         &self,
         sdk_key: String,
-        path: String,
+        path: NormalizedPath,
         encoding: CompressionEncoder,
     ) -> Arc<AuthorizedRequestContext> {
         let key = (sdk_key.clone(), path.clone(), encoding);
@@ -59,6 +61,12 @@ impl<'r> FromRequest<'r> for AuthorizedRequestContextWrapper {
     type Error = AuthError;
 
     async fn from_request(request: &'r Request<'_>) -> request::Outcome<Self, Self::Error> {
+        let normalized_path = match request.guard::<NormalizedPath>().await {
+            Outcome::Success(path) => path,
+            Outcome::Error((status, _)) => return Outcome::Error((status, AuthError)),
+            Outcome::Forward(status) => return Outcome::Forward(status),
+        };
+
         let headers = request.headers();
         let cache = request
             .rocket()
@@ -75,13 +83,9 @@ impl<'r> FromRequest<'r> for AuthorizedRequestContextWrapper {
         };
 
         match headers.get_one("statsig-api-key") {
-            Some(sdk_key) => {
-                Outcome::Success(AuthorizedRequestContextWrapper(cache.get_or_insert(
-                    sdk_key.to_string(),
-                    request.uri().path().to_string(),
-                    encoding,
-                )))
-            }
+            Some(sdk_key) => Outcome::Success(AuthorizedRequestContextWrapper(
+                cache.get_or_insert(sdk_key.to_string(), normalized_path, encoding),
+            )),
             None => Outcome::Error((Status::BadRequest, AuthError)),
         }
     }
@@ -90,29 +94,25 @@ impl<'r> FromRequest<'r> for AuthorizedRequestContextWrapper {
 #[derive(Debug)]
 pub struct AuthorizedRequestContext {
     pub sdk_key: String,
-    pub path: String,
+    pub path: NormalizedPath,
     pub use_lcut: bool,
+    pub use_dict_id: bool,
     pub encoding: CompressionEncoder,
 }
 
 impl AuthorizedRequestContext {
-    pub fn new(sdk_key: String, path: String, encoding: CompressionEncoder) -> Self {
-        let mut normalized_path = path;
-        if normalized_path.ends_with(".json") || normalized_path.ends_with(".js") {
-            if let Some(pos) = normalized_path.rfind('/') {
-                normalized_path = normalized_path[..pos + 1].to_string();
-            }
-        }
+    pub fn new(sdk_key: String, path: NormalizedPath, encoding: CompressionEncoder) -> Self {
+        let use_lcut = path == NormalizedPath::V1DownloadConfigSpecs
+            || path == NormalizedPath::V2DownloadConfigSpecs
+            || path == NormalizedPath::V2DownloadConfigSpecsWithSharedDict;
 
-        if !normalized_path.ends_with('/') {
-            normalized_path.push('/');
-        }
+        let use_dict_id = path == NormalizedPath::V2DownloadConfigSpecsWithSharedDict;
 
-        let use_lcut = normalized_path.contains("download_config_specs");
         AuthorizedRequestContext {
             sdk_key,
-            path: normalized_path,
+            path,
             use_lcut,
+            use_dict_id,
             encoding,
         }
     }
@@ -120,7 +120,13 @@ impl AuthorizedRequestContext {
 
 impl std::fmt::Display for AuthorizedRequestContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}|{}|{}", self.sdk_key, self.path, self.encoding)
+        write!(
+            f,
+            "{}|{}|{}",
+            self.sdk_key,
+            self.path.as_str(),
+            self.encoding
+        )
     }
 }
 

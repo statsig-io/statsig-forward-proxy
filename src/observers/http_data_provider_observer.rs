@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::{
-    datastore::data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
-    servers::authorized_request_context::AuthorizedRequestContext,
-};
+use crate::datastore::data_providers::{FullRequestContext, ResponseContext};
 
 use super::HttpDataProviderObserverTrait;
 
@@ -35,10 +32,8 @@ impl HttpDataProviderObserver {
 
     pub async fn notify_all(
         &self,
-        result: &DataProviderRequestResult,
-        request_context: &Arc<AuthorizedRequestContext>,
-        lcut: u64,
-        data: &Arc<ResponsePayload>,
+        request_context: &Arc<FullRequestContext>,
+        response_context: &Arc<ResponseContext>,
     ) {
         let (async_observers, sync_observers): (Vec<_>, Vec<_>) = {
             let observers = self.observers.read().await;
@@ -49,20 +44,19 @@ impl HttpDataProviderObserver {
         };
 
         if !async_observers.is_empty() {
-            let result_copy = *result;
-            let rc_clone = Arc::clone(request_context);
-            let data_copy = Arc::clone(data);
+            let request_context_clone = Arc::clone(request_context);
+            let response_context_clone = Arc::clone(response_context);
             rocket::tokio::spawn(async move {
                 for observer in async_observers {
                     observer
-                        .update(&result_copy, &rc_clone, lcut, &data_copy)
+                        .update(&request_context_clone, &response_context_clone)
                         .await;
                 }
             });
         }
 
         for observer in sync_observers {
-            observer.update(result, request_context, lcut, data).await;
+            observer.update(request_context, response_context).await;
         }
     }
 }

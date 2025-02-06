@@ -6,12 +6,16 @@ use std::{
     collections::HashMap,
     io::{Cursor, Read, Write},
     sync::Arc,
+    time::Duration,
 };
 
 use crate::{
     datastore::{
         config_spec_store::ConfigSpecForCompany,
-        data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
+        data_providers::{
+            http_data_provider::ResponsePayload, DataProviderRequestResult, FullRequestContext,
+            ResponseContext,
+        },
     },
     observers::{
         proxy_event_observer::ProxyEventObserver, HttpDataProviderObserverTrait, ProxyEvent,
@@ -32,7 +36,7 @@ use sha2::{Digest, Sha256};
 
 pub struct RedisCache {
     key_prefix: String,
-    connection: bb8::Pool<RedisConnectionManager>,
+    connection: Option<bb8::Pool<RedisConnectionManager>>,
     hash_cache: Arc<RwLock<HashMap<String, String>>>,
     uuid: String,
     leader_key_ttl: i64,
@@ -63,17 +67,16 @@ impl HttpDataProviderObserverTrait for RedisCache {
 
     async fn update(
         &self,
-        result: &DataProviderRequestResult,
-        request_context: &Arc<AuthorizedRequestContext>,
-        lcut: u64,
-        data: &Arc<ResponsePayload>,
+        request_context: &Arc<FullRequestContext>,
+        response_context: &Arc<ResponseContext>,
     ) {
         self.update_impl(
-            self.get_redis_key(request_context).await,
-            result,
-            request_context,
-            lcut,
-            data,
+            self.get_redis_key(&request_context.authorized_request_context)
+                .await,
+            &response_context.result_type,
+            &request_context.authorized_request_context,
+            response_context.lcut,
+            &response_context.body,
         )
         .await;
 
@@ -82,12 +85,13 @@ impl HttpDataProviderObserverTrait for RedisCache {
                 format!(
                     "{}::{}",
                     self.key_prefix,
-                    self.hash_key(&request_context.sdk_key, false).await
+                    self.hash_key(&request_context.authorized_request_context.sdk_key, false)
+                        .await
                 ),
-                result,
-                request_context,
-                lcut,
-                data,
+                &response_context.result_type,
+                &request_context.authorized_request_context,
+                response_context.lcut,
+                &response_context.body,
             )
             .await;
         }
@@ -96,8 +100,9 @@ impl HttpDataProviderObserverTrait for RedisCache {
     async fn get(
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
+        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
-        let connection = self.connection.get().await;
+        let connection = self.connection.as_ref()?.get().await;
         let redis_key = self.get_redis_key(request_context).await;
         match connection {
             Ok(mut conn) => {
@@ -157,6 +162,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                             data: Arc::from(Bytes::from(compressed)),
                                         }),
                                         lcut: lcut.unwrap_or(0),
+                                        zstd_dict_id: None,
                                     }))
                                 }
                                 false => Some(Arc::new(ConfigSpecForCompany {
@@ -165,6 +171,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                         data: Arc::from(Bytes::from(data)),
                                     }),
                                     lcut: lcut.unwrap_or(0),
+                                    zstd_dict_id: None,
                                 })),
                             }
                         }
@@ -208,6 +215,7 @@ impl RedisCache {
         check_lcut: bool,
         redis_cache_ttl_in_s: i64,
         double_write_cache_for_legacy_key: bool,
+        redis_connection_timeout_in_s: u64,
     ) -> Self {
         let config = envy::from_env::<RedisEnvConfig>().expect("Malformed config");
         let protocol = match config.redis_tls.is_some_and(|x| x) {
@@ -228,11 +236,19 @@ impl RedisCache {
         let redis_manager = RedisConnectionManager::new(redis_url)
             .expect("Failed to create redis connection manager");
         let redis_pool = bb8::Pool::builder()
+            .connection_timeout(Duration::from_secs(redis_connection_timeout_in_s))
+            .retry_connection(true)
             .max_size(config.redis_connection_pool_max_size.unwrap_or(10))
             .min_idle(config.redis_connection_pool_min_size.unwrap_or(1))
             .build(redis_manager)
             .await
-            .expect("Failed to create redis connection pool on startup");
+            .map_err(|e| {
+                eprintln!(
+                    "Failed to create redis connection pool on startup. Will continue to run without DataStore. Error: {:?}",
+                    e
+                );
+            })
+            .ok();
 
         RedisCache {
             key_prefix,
@@ -252,14 +268,10 @@ impl RedisCache {
         // For compression encoding, we only write plain text until we added support to decompress from sdk side
         format!(
             "statsig|{}|{}|{}",
-            Self::sanitize_path(&request_context.path),
+            request_context.path.as_str().trim_end_matches('/'),
             CompressionEncoder::PlainText,
             self.hash_key(&request_context.sdk_key, true).await
         )
-    }
-
-    fn sanitize_path(path: &str) -> String {
-        path.trim_end_matches('/').to_string()
     }
 
     async fn hash_key(&self, key: &str, use_base64_encode: bool) -> String {
@@ -295,10 +307,10 @@ impl RedisCache {
         data: &Arc<ResponsePayload>,
     ) {
         if result == &DataProviderRequestResult::DataAvailable {
-            let connection: Result<
-                bb8::PooledConnection<RedisConnectionManager>,
-                bb8::RunError<RedisError>,
-            > = self.connection.get().await;
+            let connection = match self.connection.as_ref() {
+                Some(conn) => conn.get().await,
+                None => return,
+            };
             match connection {
                 Ok(mut conn) => {
                     let mut pipe = redis::pipe();
@@ -439,7 +451,10 @@ impl RedisCache {
                 }
             }
         } else if result == &DataProviderRequestResult::Unauthorized {
-            let connection = self.connection.get().await;
+            let connection = match self.connection.as_ref() {
+                Some(conn) => conn.get().await,
+                None => return,
+            };
             match connection {
                 Ok(mut conn) => match conn.del(&redis_key).await {
                     Ok(()) => {

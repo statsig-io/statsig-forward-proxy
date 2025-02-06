@@ -1,6 +1,5 @@
 use super::config_spec_store::ConfigSpecForCompany;
-use super::data_providers::http_data_provider::ResponsePayload;
-use super::data_providers::DataProviderRequestResult;
+use super::data_providers::{DataProviderRequestResult, FullRequestContext, ResponseContext};
 use crate::observers::HttpDataProviderObserverTrait;
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
 use async_trait::async_trait;
@@ -16,27 +15,28 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
 
     async fn update(
         &self,
-        result: &DataProviderRequestResult,
-        request_context: &Arc<AuthorizedRequestContext>,
-        lcut: u64,
-        _data: &Arc<ResponsePayload>,
+        request_context: &Arc<FullRequestContext>,
+        response_context: &Arc<ResponseContext>,
     ) {
-        match result {
+        match response_context.result_type {
             DataProviderRequestResult::DataAvailable => {
-                if !request_context.use_lcut
+                if !request_context.authorized_request_context.use_lcut
                     || self
                         .keystore
                         .read()
-                        .get(request_context)
-                        .map_or(true, |&v| v < lcut)
+                        .get(&request_context.authorized_request_context)
+                        .map_or(true, |v| v.0 < response_context.lcut)
                 {
-                    self.keystore
-                        .write()
-                        .insert(Arc::clone(request_context), lcut);
+                    self.keystore.write().insert(
+                        Arc::clone(&request_context.authorized_request_context),
+                        (response_context.lcut, response_context.zstd_dict_id.clone()),
+                    );
                 }
             }
             DataProviderRequestResult::Unauthorized => {
-                self.keystore.write().remove(request_context);
+                self.keystore
+                    .write()
+                    .remove(&request_context.authorized_request_context);
             }
             _ => {}
         }
@@ -45,13 +45,22 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
     async fn get(
         &self,
         _request_context: &Arc<AuthorizedRequestContext>,
+        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         None
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct SdkKeyStoreItem {
+    pub request_context: Arc<AuthorizedRequestContext>,
+    pub lcut: u64,
+    pub zstd_dict_id: Option<Arc<str>>,
+}
+
+type SdkKeyStoreValue = (u64, Option<Arc<str>>);
 pub struct SdkKeyStore {
-    keystore: Arc<RwLock<HashMap<Arc<AuthorizedRequestContext>, u64>>>,
+    keystore: Arc<RwLock<HashMap<Arc<AuthorizedRequestContext>, SdkKeyStoreValue>>>,
 }
 
 impl Default for SdkKeyStore {
@@ -71,11 +80,15 @@ impl SdkKeyStore {
         self.keystore.read().contains_key(request_context)
     }
 
-    pub fn get_registered_store(&self) -> Vec<(Arc<AuthorizedRequestContext>, u64)> {
+    pub fn get_registered_store(&self) -> Vec<SdkKeyStoreItem> {
         self.keystore
             .read()
             .iter()
-            .map(|(key, &value)| (key.clone(), value))
+            .map(|(key, value)| SdkKeyStoreItem {
+                request_context: key.clone(),
+                lcut: value.0,
+                zstd_dict_id: value.1.clone(),
+            })
             .collect()
     }
 }

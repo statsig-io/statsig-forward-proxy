@@ -2,9 +2,15 @@ FROM amd64/rust:1.83-alpine3.19 as builder
 
 RUN apk update && apk add git curl build-base autoconf automake libtool pkgconfig libressl-dev musl-dev gcc libc-dev g++ libffi-dev
 
+# Install protoc
 RUN curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v26.0/protoc-26.0-linux-x86_64.zip
 RUN unzip protoc-26.0-linux-x86_64.zip
 RUN cp ./bin/protoc /usr/bin/protoc
+
+# Download grpc-health-probe binary
+RUN curl -L -o grpc-health-probe \
+  https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.37/grpc_health_probe-linux-amd64 && \
+  chmod +x grpc-health-probe
 
 # create a new empty shell project, copy dependencies
 # and install to allow caching of dependencies
@@ -30,6 +36,9 @@ FROM nginx:alpine
 
 # Copy the build artifact from the build stage
 COPY --from=builder /statsig_forward_proxy/target/release/server /usr/local/bin/statsig_forward_proxy
+
+# Copy grpc-health-probe binary
+COPY --from=builder /grpc-health-probe /usr/local/bin/grpc-health-probe
 
 # Copy other necessary files
 COPY ./.cargo /app/.cargo

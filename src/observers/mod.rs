@@ -10,7 +10,7 @@ use once_cell::sync::Lazy;
 use crate::{
     datastore::{
         config_spec_store::ConfigSpecForCompany,
-        data_providers::{http_data_provider::ResponsePayload, DataProviderRequestResult},
+        data_providers::{FullRequestContext, ResponseContext},
     },
     servers::authorized_request_context::AuthorizedRequestContext,
 };
@@ -21,14 +21,13 @@ pub trait HttpDataProviderObserverTrait {
 
     async fn update(
         &self,
-        result: &DataProviderRequestResult,
-        request_context: &Arc<AuthorizedRequestContext>,
-        lcut: u64,
-        data: &Arc<ResponsePayload>,
+        request_context: &Arc<FullRequestContext>,
+        response_context: &Arc<ResponseContext>,
     );
     async fn get(
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
+        zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>>;
 }
 
@@ -136,6 +135,7 @@ pub struct ProxyEvent {
     pub event_type: ProxyEventType,
     request_context: Option<Arc<AuthorizedRequestContext>>,
     pub lcut: Option<u64>,
+    pub zstd_dict_id: Option<Arc<str>>,
     pub stat: Option<EventStat>,
     pub status_code: Option<u16>,
 }
@@ -149,6 +149,7 @@ impl ProxyEvent {
             event_type,
             request_context: Some(Arc::clone(request_context)),
             lcut: None,
+            zstd_dict_id: None,
             stat: None,
             status_code: None,
         }
@@ -159,6 +160,7 @@ impl ProxyEvent {
             event_type,
             request_context: None,
             lcut: None,
+            zstd_dict_id: None,
             stat: None,
             status_code: None,
         }
@@ -190,12 +192,17 @@ impl ProxyEvent {
         })
     }
 
-    pub fn get_path(&self) -> Option<String> {
-        self.request_context.as_ref().map(|rc| rc.path.clone())
+    pub fn get_path(&self) -> Option<&str> {
+        self.request_context.as_ref().map(|rc| rc.path.as_str())
     }
 
     pub fn with_lcut(mut self, lcut: u64) -> Self {
         self.lcut = Some(lcut);
+        self
+    }
+
+    pub fn with_zstd_dict_id(mut self, zstd_dict_id: Option<Arc<str>>) -> Self {
+        self.zstd_dict_id = zstd_dict_id;
         self
     }
 
@@ -227,6 +234,7 @@ impl Hash for ProxyEvent {
             rc.path.hash(state);
         }
         self.lcut.hash(state);
+        self.zstd_dict_id.hash(state);
         self.status_code.hash(state);
     }
 }
@@ -236,6 +244,7 @@ impl PartialEq for ProxyEvent {
         self.request_context == other.request_context
             && self.lcut == other.lcut
             && self.status_code == other.status_code
+            && self.zstd_dict_id == other.zstd_dict_id
     }
 }
 

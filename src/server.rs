@@ -8,7 +8,9 @@ use datastore::config_spec_store::ConfigSpecStore;
 use datastore::data_providers::request_builder::CachedRequestBuilders;
 use datastore::data_providers::request_builder::DcsRequestBuilder;
 use datastore::data_providers::request_builder::IdlistRequestBuilder;
+use datastore::data_providers::request_builder::SharedDictDcsRequestBuilder;
 use datastore::log_event_store::LogEventStore;
+use datastore::shared_dict_config_spec_store::SharedDictConfigSpecStore;
 use datastore::{
     caching::redis_cache,
     data_providers::{background_data_provider, http_data_provider},
@@ -19,6 +21,7 @@ use loggers::debug_logger;
 use loggers::nginx_cache_monitor;
 use loggers::stats_logger;
 use observers::http_data_provider_observer::HttpDataProviderObserver;
+use servers::normalized_path::NormalizedPath;
 use tokio_util::sync::CancellationToken;
 
 use datastore::id_list_store::GetIdListStore;
@@ -71,6 +74,8 @@ pub struct Cli {
     polling_interval_in_s: u64,
     #[clap(short, long, default_value = "64")]
     update_batch_size: u64,
+    #[clap(long, default_value = "5")]
+    redis_connection_timeout_in_s: u64,
     #[clap(short, long, default_value = "70")]
     redis_leader_key_ttl: i64,
     #[clap(long, default_value = "86400")]
@@ -81,6 +86,11 @@ pub struct Cli {
     force_gcp_profiling_enabled: bool,
     #[clap(short, long, default_value = "500")]
     grpc_max_concurrent_streams: u32,
+    // Max total percentage of total streams that can be connected
+    // for the GRPC ready endpoint to return that it is ready to
+    // serve requests.
+    #[clap(long, default_value = "90")]
+    grpc_ready_endpoint_percentage_of_total_streams_threshold: usize,
     // By default, we do not enable this configuration. This allows you to ensure
     // if there are any issues with authorization on Statsig's end you still
     // have a payload to server.
@@ -179,6 +189,47 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
     .await;
 }
 
+async fn create_shared_dict_config_spec_store(
+    _cli: &Cli,
+    overrides: &ConfigurationAndOverrides,
+    background_data_provider: Arc<background_data_provider::BackgroundDataProvider>,
+    config_spec_observer: Arc<HttpDataProviderObserver>,
+    shared_cache: &Arc<dyn HttpDataProviderObserverTrait + Send + Sync>,
+    sdk_key_store: &Arc<sdk_key_store::SdkKeyStore>,
+) -> Arc<SharedDictConfigSpecStore> {
+    let dcs_request_builder = Arc::new(SharedDictDcsRequestBuilder::new(
+        overrides
+            .statsig_endpoint
+            .as_ref()
+            .map_or("https://api.statsigcdn.com".to_string(), |s| s.to_string()),
+        Arc::clone(&config_spec_observer),
+        Arc::clone(shared_cache),
+    ));
+    CachedRequestBuilders::add_request_builder(
+        NormalizedPath::V2DownloadConfigSpecsWithSharedDict,
+        dcs_request_builder,
+    );
+    let config_spec_store = Arc::new(
+        datastore::shared_dict_config_spec_store::SharedDictConfigSpecStore::new(
+            background_data_provider.clone(),
+            // Controls the number of historical responses to cache per SDK key.
+            // For each unique compression dictionary, we cache the most recent response from origin.
+            3,
+        ),
+    );
+    config_spec_observer
+        .add_observer(sdk_key_store.clone())
+        .await;
+    config_spec_observer
+        .add_observer(config_spec_store.clone())
+        .await;
+    config_spec_observer
+        .add_observer(Arc::clone(shared_cache))
+        .await;
+
+    config_spec_store
+}
+
 async fn create_config_spec_store(
     _cli: &Cli,
     overrides: &ConfigurationAndOverrides,
@@ -196,10 +247,13 @@ async fn create_config_spec_store(
         Arc::clone(shared_cache),
     ));
     CachedRequestBuilders::add_request_builder(
-        "/v1/download_config_specs/",
+        NormalizedPath::V1DownloadConfigSpecs,
         dcs_request_builder.clone(),
     );
-    CachedRequestBuilders::add_request_builder("/v2/download_config_specs/", dcs_request_builder);
+    CachedRequestBuilders::add_request_builder(
+        NormalizedPath::V2DownloadConfigSpecs,
+        dcs_request_builder.clone(),
+    );
     let config_spec_store = Arc::new(datastore::config_spec_store::ConfigSpecStore::new(
         sdk_key_store.clone(),
         background_data_provider.clone(),
@@ -244,7 +298,10 @@ async fn create_id_list_store(
         Arc::clone(&idlist_observer),
         Arc::clone(shared_cache),
     ));
-    CachedRequestBuilders::add_request_builder("/v1/get_id_lists/", idlist_request_builder);
+    CachedRequestBuilders::add_request_builder(
+        NormalizedPath::V1GetIdLists,
+        idlist_request_builder,
+    );
     let id_list_store = Arc::new(datastore::id_list_store::GetIdListStore::new(
         sdk_key_store.clone(),
         background_data_provider.clone(),
@@ -305,6 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 true, /* check lcut */
                 cli.redis_cache_ttl_in_s,
                 cli.double_write_cache_for_legacy_key,
+                cli.redis_connection_timeout_in_s,
             )
             .await,
         ),
@@ -319,6 +377,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 true, /* check lcut */
                 cli.redis_cache_ttl_in_s,
                 cli.double_write_cache_for_legacy_key,
+                cli.redis_connection_timeout_in_s,
             )
             .await,
         ),
@@ -330,6 +389,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &overrides,
         Arc::clone(&background_data_provider),
         Arc::clone(&config_spec_observer),
+        &redis_cache,
+        &sdk_key_store,
+    )
+    .await;
+    let shared_dict_config_spec_observer = Arc::new(HttpDataProviderObserver::new());
+    let shared_dict_config_spec_store = create_shared_dict_config_spec_store(
+        &cli,
+        &overrides,
+        Arc::clone(&background_data_provider),
+        Arc::clone(&shared_dict_config_spec_observer),
         &redis_cache,
         &sdk_key_store,
     )
@@ -362,8 +431,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.mode {
         TransportMode::Grpc => {
             servers::grpc_server::GrpcServer::start_server(
+                // TODO: DCS shared dict compression support for grpc
                 &cli,
                 config_spec_store,
+                shared_dict_config_spec_store,
                 config_spec_observer,
                 rc_cache,
             )
@@ -373,6 +444,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             servers::http_server::HttpServer::start_server(
                 &cli,
                 config_spec_store,
+                shared_dict_config_spec_store,
                 log_event_store,
                 id_list_store,
                 rc_cache,
@@ -383,12 +455,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let grpc_server = servers::grpc_server::GrpcServer::start_server(
                 &cli,
                 config_spec_store.clone(),
+                shared_dict_config_spec_store.clone(),
                 config_spec_observer.clone(),
                 rc_cache.clone(),
             );
             let http_server = servers::http_server::HttpServer::start_server(
                 &cli,
                 config_spec_store,
+                shared_dict_config_spec_store,
                 log_event_store,
                 id_list_store,
                 rc_cache,

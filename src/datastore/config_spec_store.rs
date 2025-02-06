@@ -1,6 +1,6 @@
 use super::data_providers::background_data_provider::{foreground_fetch, BackgroundDataProvider};
 use super::data_providers::http_data_provider::ResponsePayload;
-use super::data_providers::DataProviderRequestResult;
+use super::data_providers::{DataProviderRequestResult, FullRequestContext, ResponseContext};
 use super::sdk_key_store::SdkKeyStore;
 
 use crate::observers::proxy_event_observer::ProxyEventObserver;
@@ -20,6 +20,7 @@ use dashmap::DashMap;
 #[derive(Clone, Debug)]
 pub struct ConfigSpecForCompany {
     pub lcut: u64,
+    pub zstd_dict_id: Option<Arc<str>>,
     pub config: Arc<ResponsePayload>,
 }
 
@@ -39,19 +40,21 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
 
     async fn update(
         &self,
-        result: &DataProviderRequestResult,
-        request_context: &Arc<AuthorizedRequestContext>,
-        lcut: u64,
-        data: &Arc<ResponsePayload>,
+        request_context: &Arc<FullRequestContext>,
+        response_context: &Arc<ResponseContext>,
     ) {
-        if result == &DataProviderRequestResult::Error
-            || result == &DataProviderRequestResult::DataAvailable
+        if response_context.result_type == DataProviderRequestResult::Error
+            || response_context.result_type == DataProviderRequestResult::DataAvailable
         {
-            if !self.store.contains_key(request_context) {
-                let rc = request_context.clone();
+            if !self
+                .store
+                .contains_key(&request_context.authorized_request_context)
+            {
+                let rc = Arc::clone(&request_context.authorized_request_context);
                 let new_data = Arc::new(ConfigSpecForCompany {
-                    lcut,
-                    config: data.clone(),
+                    lcut: response_context.lcut,
+                    zstd_dict_id: response_context.zstd_dict_id.clone(),
+                    config: response_context.body.clone(),
                 });
                 self.store.insert(rc, new_data);
                 return;
@@ -59,41 +62,45 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
 
             let stored_lcut = self
                 .store
-                .get(request_context)
+                .get(&request_context.authorized_request_context)
                 .map(|record| record.lcut)
                 .unwrap_or(0);
 
-            if lcut > stored_lcut {
+            if response_context.lcut > stored_lcut {
                 let new_data = Arc::new(ConfigSpecForCompany {
-                    lcut,
-                    config: data.clone(),
+                    lcut: response_context.lcut,
+                    zstd_dict_id: response_context.zstd_dict_id.clone(),
+                    config: response_context.body.clone(),
                 });
                 self.store
-                    .entry(request_context.clone())
+                    .entry(request_context.authorized_request_context.clone())
                     .and_modify(|entry| {
                         *entry = new_data.clone();
                         ProxyEventObserver::publish_event(
                             ProxyEvent::new_with_rc(
                                 ProxyEventType::UpdateConfigSpecStorePropagationDelayMs,
-                                request_context,
+                                &request_context.authorized_request_context,
                             )
-                            .with_lcut(lcut)
+                            .with_lcut(response_context.lcut)
                             .with_stat(EventStat {
                                 operation_type: OperationType::Distribution,
-                                value: Utc::now().timestamp_millis() - (lcut as i64),
+                                value: Utc::now().timestamp_millis()
+                                    - (response_context.lcut as i64),
                             }),
                         );
                     })
                     .or_insert(new_data);
             }
-        } else if result == &DataProviderRequestResult::Unauthorized {
-            self.store.remove(request_context);
+        } else if response_context.result_type == DataProviderRequestResult::Unauthorized {
+            self.store
+                .remove(&request_context.authorized_request_context);
         }
     }
 
     async fn get(
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
+        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         self.store.get(request_context).map(|record| record.clone())
     }
@@ -127,6 +134,7 @@ impl ConfigSpecStore {
                 self.background_data_provider.clone(),
                 request_context,
                 0,
+                &None,
                 // Since it's a cache-miss, it doesn't matter what we do
                 // if we receive a 4xx, so no point clearing any
                 // caches
@@ -151,6 +159,7 @@ impl ConfigSpecStore {
                 } else {
                     Some(Arc::new(ConfigSpecForCompany {
                         lcut,
+                        zstd_dict_id: None,
                         config: Arc::clone(&self.no_update_config),
                     }))
                 }

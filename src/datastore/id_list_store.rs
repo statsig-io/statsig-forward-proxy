@@ -1,7 +1,7 @@
 use super::config_spec_store::ConfigSpecForCompany;
 use super::data_providers::background_data_provider::{foreground_fetch, BackgroundDataProvider};
 use super::data_providers::http_data_provider::ResponsePayload;
-use super::data_providers::DataProviderRequestResult;
+use super::data_providers::{DataProviderRequestResult, FullRequestContext, ResponseContext};
 use super::sdk_key_store::SdkKeyStore;
 use crate::observers::HttpDataProviderObserverTrait;
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
@@ -29,28 +29,28 @@ impl HttpDataProviderObserverTrait for GetIdListStore {
 
     async fn update(
         &self,
-        result: &DataProviderRequestResult,
-        request_context: &Arc<AuthorizedRequestContext>,
-        _lcut: u64,
-        data: &Arc<ResponsePayload>,
+        request_context: &Arc<FullRequestContext>,
+        response_context: &Arc<ResponseContext>,
     ) {
-        if result == &DataProviderRequestResult::Error
-            || result == &DataProviderRequestResult::DataAvailable
+        if response_context.result_type == DataProviderRequestResult::Error
+            || response_context.result_type == DataProviderRequestResult::DataAvailable
         {
             self.store.insert(
-                Arc::clone(request_context),
+                Arc::clone(&request_context.authorized_request_context),
                 Arc::new(IdlistForCompany {
-                    idlists: data.clone(),
+                    idlists: response_context.body.clone(),
                 }),
             );
-        } else if result == &DataProviderRequestResult::Unauthorized {
-            self.store.remove(request_context);
+        } else if response_context.result_type == DataProviderRequestResult::Unauthorized {
+            self.store
+                .remove(&request_context.authorized_request_context);
         }
     }
 
     async fn get(
         &self,
         _request_context: &Arc<AuthorizedRequestContext>,
+        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         unimplemented!()
     }
@@ -79,6 +79,7 @@ impl GetIdListStore {
                 self.background_data_provider.clone(),
                 request_context,
                 0,
+                &None,
                 false,
             )
             .await;

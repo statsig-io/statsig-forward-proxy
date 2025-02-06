@@ -1,3 +1,4 @@
+use once_cell::sync::Lazy;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -9,6 +10,7 @@ use crate::observers::{proxy_event_observer::ProxyEventObserver, ProxyEvent, Pro
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
 use crate::utils::compress_encoder::CompressionEncoder;
 use bytes::Bytes;
+use regex::Regex;
 use reqwest::header::HeaderMap;
 
 #[derive(Debug)]
@@ -34,17 +36,18 @@ impl DataProviderTrait for HttpDataProvider {
         request_builder: &Arc<dyn RequestBuilderTrait>,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
+        zstd_dict_id: &Option<Arc<str>>,
     ) -> DataProviderResult {
         let start_time = Instant::now();
 
         let response = match request_builder
-            .make_request(http_client, request_context, lcut)
+            .make_request(http_client, request_context, lcut, zstd_dict_id)
             .await
         {
             Ok(response) => response,
             Err(err) => {
                 return self
-                    .handle_error(err.to_string(), start_time, request_context, lcut)
+                    .handle_error(format!("{:?}", err), start_time, request_context, lcut)
                     .await
             }
         };
@@ -56,7 +59,7 @@ impl DataProviderTrait for HttpDataProvider {
             Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), bytes),
             Err(err) => {
                 return self
-                    .handle_error(err.to_string(), start_time, request_context, lcut)
+                    .handle_error(format!("{:?}", err), start_time, request_context, lcut)
                     .await
             }
         };
@@ -74,9 +77,8 @@ impl DataProviderTrait for HttpDataProvider {
             return self.handle_no_data(lcut, start_time, request_context).await;
         }
 
-        let since_time = self
-            .parse_since_time(&headers, lcut, start_time, request_context)
-            .await;
+        let since_time = self.parse_since_time(&headers, lcut, start_time, request_context);
+        let compressed_with_dict = self.parse_zstd_dict_id(&headers, request_context);
         let content_encoding =
             headers
                 .get("content-encoding")
@@ -87,12 +89,16 @@ impl DataProviderTrait for HttpDataProvider {
         self.handle_success(
             (content_encoding, bytes),
             since_time,
+            &compressed_with_dict,
             start_time,
             request_context,
         )
         .await
     }
 }
+
+static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"(secret-[a-zA-Z0-9]+)").unwrap());
+static REDACTED_STR: Lazy<Arc<str>> = Lazy::new(|| Arc::from("REDACTED"));
 
 impl HttpDataProvider {
     async fn handle_error(
@@ -102,18 +108,25 @@ impl HttpDataProvider {
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
     ) -> DataProviderResult {
-        eprintln!("Failed to get data from http provider: {:?}", err_msg);
         let duration = start_time.elapsed();
         let ms = duration.as_millis() as i64;
-
-        ProxyEventObserver::publish_event(
-            ProxyEvent::new_with_rc(ProxyEventType::HttpDataProviderError, request_context)
-                .with_lcut(lcut)
-                .with_stat(EventStat {
-                    operation_type: OperationType::Distribution,
-                    value: ms,
-                }),
+        let event = ProxyEvent::new_with_rc(ProxyEventType::HttpDataProviderError, request_context)
+            .with_lcut(lcut)
+            .with_stat(EventStat {
+                operation_type: OperationType::Distribution,
+                value: ms,
+            });
+        eprintln!(
+            "Failed to get data from http provider: {:?}",
+            SECRET_REGEX.replace_all(
+                &err_msg,
+                event
+                    .get_sdk_key()
+                    .unwrap_or(Arc::clone(&REDACTED_STR))
+                    .to_string()
+            )
         );
+        ProxyEventObserver::publish_event(event);
 
         DataProviderResult {
             result: if err_msg.contains("401") || err_msg.contains("403") {
@@ -121,7 +134,9 @@ impl HttpDataProvider {
             } else {
                 DataProviderRequestResult::Error
             },
-            data: None,
+            body: None,
+            lcut: 0,
+            zstd_dict_id: None,
         }
     }
 
@@ -145,11 +160,33 @@ impl HttpDataProvider {
 
         DataProviderResult {
             result: DataProviderRequestResult::NoDataAvailable,
-            data: None,
+            body: None,
+            lcut: 0,
+            zstd_dict_id: None,
         }
     }
 
-    async fn parse_since_time(
+    fn parse_zstd_dict_id(
+        &self,
+        headers: &HeaderMap,
+        request_context: &Arc<AuthorizedRequestContext>,
+    ) -> Option<Arc<str>> {
+        if !request_context.use_dict_id {
+            return None;
+        }
+
+        let zstd_dict_id: Option<Arc<str>> = headers
+            .get("x-compression-dict")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| match value.is_empty() {
+                true => None,
+                false => Some(Arc::from(value.to_string())),
+            });
+
+        zstd_dict_id
+    }
+
+    fn parse_since_time(
         &self,
         headers: &HeaderMap,
         lcut: u64,
@@ -188,6 +225,7 @@ impl HttpDataProvider {
         &self,
         (encoding_str, data): (Option<String>, Bytes),
         since_time: u64,
+        zstd_dict_id: &Option<Arc<str>>,
         start_time: Instant,
         request_context: &Arc<AuthorizedRequestContext>,
     ) -> DataProviderResult {
@@ -202,6 +240,7 @@ impl HttpDataProvider {
         ProxyEventObserver::publish_event(
             ProxyEvent::new_with_rc(ProxyEventType::HttpDataProviderGotData, request_context)
                 .with_lcut(since_time)
+                .with_zstd_dict_id(zstd_dict_id.clone())
                 .with_stat(EventStat {
                     operation_type: OperationType::Distribution,
                     value: ms,
@@ -210,13 +249,12 @@ impl HttpDataProvider {
 
         DataProviderResult {
             result: DataProviderRequestResult::DataAvailable,
-            data: Some((
-                Arc::new(ResponsePayload {
-                    encoding: Arc::from(encoding),
-                    data: Arc::from(data),
-                }),
-                since_time,
-            )),
+            body: Some(Arc::new(ResponsePayload {
+                encoding: Arc::from(encoding),
+                data: Arc::from(data),
+            })),
+            lcut: since_time,
+            zstd_dict_id: zstd_dict_id.clone(),
         }
     }
 }
