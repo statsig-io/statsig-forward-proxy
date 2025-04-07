@@ -1,0 +1,180 @@
+# Default values for statsig-forward-proxy.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: statsig/statsig-forward-proxy
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  automount: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+pod:
+  # Annotations to add to the pod.
+  annotations: {}
+  # Labels to add to the pod.
+  labels: {}
+  # Security context applied to the pod.
+  securityContext: {}
+  # PriorityClassName to apply to the pod.
+  priorityClassName: ""
+  # PodDisruptionBudget configuration
+  pdb:
+    # -- Deploy a [PodDisruptionBudget] for statsig forward proxy
+    enabled: false
+    # -- Labels to be added to statsig forward proxy pdb
+    labels: {}
+    # -- Annotations to be added to statsig forward proxy pdb
+    annotations: {}
+    # -- Number of pods that are available after eviction as number or percentage (eg.: 50%)
+    # @default -- `""` (defaults to 0 if not specified)
+    minAvailable: ""
+    # -- Number of pods that are unavailble after eviction as number or percentage (eg.: 50%).
+    ## Has higher precedence over `dex.pdb.minAvailable`
+    maxUnavailable: ""
+  topologySpreadConstraints: []
+  # - maxSkew: 1
+  #   topologyKey: topology.kubernetes.io/zone
+  #   whenUnsatisfiable: DoNotSchedule
+
+# Grace period for termination in seconds
+terminationGracePeriodSeconds: 60
+
+# Container security context
+securityContext: {}
+  #  runAsUser: 999
+  #  runAsGroup: 999
+  #  fsGroup: 999
+
+service:
+  type: ClusterIP
+  # Service annotations
+  annotations: {}
+  ports:
+    - name: http
+      port: 8000
+      protocol: TCP
+    - name: grpc
+      port: 50051
+      protocol: TCP
+
+# This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+
+resources: {}
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+# This section is for setting up autoscaling more information can be found here: https://kubernetes.io/docs/concepts/workloads/autoscaling/
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Additional volumes on the output Deployment definition.
+volumes: []
+# - name: foo
+#   secret:
+#     secretName: mysecret
+#     optional: false
+
+# Additional volumeMounts on the output Deployment definition.
+volumeMounts: []
+# - name: foo
+#   mountPath: "/etc/foo"
+#   readOnly: true
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Statsig Forward Proxy application configuration
+# Refer to the configuration options here: https://github.com/statsig-io/statsig-forward-proxy/tree/main?tab=readme-ov-file#deploying
+sfp:
+  # Specify the environment variables here to load them into this chart's ConfigMap directly.
+  # These environment variables should match the ones documented by your application.
+  environment: {}
+    # STATSIG_ENDPOINT: "https://api.statsigcdn.com"
+
+  # Container command-line arguments. 
+  args: ["http", "disabled"]
+
+  # More complex `valueFrom` style variable configurations for the deployment
+  environmentVariables: []
+    # - name: POD_IP
+    #   valueFrom:
+    #     fieldRef:
+    #       fieldPath: status.podIP
+
+  # Use k8s secrets to set environment variables.
+  secrets: []
+    # Set environment variables in the container with values pulled from k8s secrets by specifying the envName property.
+    # - envName: STATSIG_SERVER_SDK_KEY
+    #   secretName: statsig-server-sdk-key
+    #   secretKey: statsig-server-sdk-key
+
+  # Use k8s secrets to set envFrom. This differs from `secrets` as this dynamically sets the environment variables from
+  # the key value pairs in the k8s secret.
+  envFromSecret: ~
+  # envFromSecret: "statsig-proxy-secrets"
+
+  # Default liveness, readiness, and startup probes
+  livenessProbe:
+    httpGet:
+      path: /v1/health
+      port: 8000
+  readinessProbe:
+    httpGet:
+      path: /v1/ready
+      port: 8000
+  startupProbe:
+    httpGet:
+      path: /v1/startup
+      port: 8000
+
+  # Container lifecycle hooks
+  lifecycle: []
+    # preStop:
+    #   exec:
+    #     command:
+    #       - sh
+    #       - -c
+    #       - sleep 30

@@ -1,0 +1,16 @@
+apiVersion: v2
+name: statsig-forward-proxy
+description: A Helm chart for Statsig Forward Proxy, a self-managed proxy service that works with Statsig APIs.
+
+appVersion: 3.0.1
+version: 0.1.0
+home: https://github.com/statsig-io/statsig-forward-proxy
+icon: https://argo-cd.readthedocs.io/en/stable/assets/logo.png
+sources:
+  - https://github.com/statsig-io/statsig-forward-proxy
+keywords:
+  - statsig
+  - statsig-forward-proxy
+maintainers:
+  - name: statsig
+    url: https://statsig.com

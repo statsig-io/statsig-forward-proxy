@@ -14,6 +14,23 @@ Our release can be found here: https://hub.docker.com/r/statsig/statsig-forward-
 
 # Deploying
 
+## Using Helm Chart
+
+For Kubernetes deployments, we provide a Helm chart that simplifies the installation and configuration process:
+
+```bash
+# Add the Statsig Helm repository
+helm repo add statsig https://statsig-helm.storage.googleapis.com
+helm repo update
+
+# Install the chart
+helm install statsig-forward-proxy statsig/statsig-forward-proxy --set sfp.environment.STATSIG_SERVER_SDK_KEY=your-sdk-key
+```
+
+For detailed configuration options and more advanced installation scenarios, please refer to the [Helm chart README](./chart/README.md).
+
+## Manual Deployment
+
 You could optionally build your own binary, however, we have provided a pre-built amd64/linux build. When starting up the binary, either standalone or through docker. You have various options to configure:
 
 ```
