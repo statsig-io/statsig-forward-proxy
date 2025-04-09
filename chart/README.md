@@ -30,12 +30,7 @@ helm install statsig-forward-proxy statsig/statsig-forward-proxy -f values.yaml
 For Statsig Forward Proxy to function correctly, you must provide your Statsig Server SDK key. You can do this in several ways:
 
 ```bash
-# Option 1: Using --set flag
-helm install statsig-forward-proxy statsig/statsig-forward-proxy --set sfp.environment.STATSIG_SERVER_SDK_KEY=your-sdk-key
-
-# Option 2: Creating a Kubernetes secret and referencing it
-kubectl create secret generic statsig-secrets --from-literal=STATSIG_SERVER_SDK_KEY=your-sdk-key
-helm install statsig-forward-proxy statsig/statsig-forward-proxy --set sfp.envFromSecret=statsig-secrets
+helm install statsig-forward-proxy statsig/statsig-forward-proxy
 ```
 
 ## Configurations
@@ -93,10 +88,7 @@ The default values file is only intended to be a starting point of configuring S
 | sfp.environmentVariables              | array   | `[]`                               | Complex `valueFrom` style variable configurations for the deployment                     |
 | sfp.secrets                           | array   | `[]`                               | Environment variables set from Kubernetes secrets                                        |
 | sfp.envFromSecret                     | string  | `nil`                              | Name of a Kubernetes secret to set all environment variables from its key-value pairs    |
-| sfp.livenessProbe                     | object  | HTTP check on `/liveness` endpoint | Container liveness probe configuration                                                  |
-| sfp.readinessProbe                    | object  | HTTP check on `/readiness` endpoint| Container readiness probe configuration                                                 |
-| sfp.startupProbe                      | object  | HTTP check on `/startup` endpoint  | Container startup probe configuration                                                   |
+| sfp.livenessProbe                     | object  | HTTP check on `/v1/health` endpoint | Container liveness probe configuration                                                  |
+| sfp.readinessProbe                    | object  | HTTP check on `/v1/ready` endpoint| Container readiness probe configuration                                                 |
+| sfp.startupProbe                      | object  | HTTP check on `/v1/startup` endpoint  | Container startup probe configuration                                                   |
 | sfp.lifecycle                         | array   | `[]`                               | Container lifecycle hooks                                                               |
-
-
-

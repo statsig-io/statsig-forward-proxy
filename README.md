@@ -24,7 +24,7 @@ helm repo add statsig https://statsig-helm.storage.googleapis.com
 helm repo update
 
 # Install the chart
-helm install statsig-forward-proxy statsig/statsig-forward-proxy --set sfp.environment.STATSIG_SERVER_SDK_KEY=your-sdk-key
+helm install statsig-forward-proxy statsig/statsig-forward-proxy
 ```
 
 For detailed configuration options and more advanced installation scenarios, please refer to the [Helm chart README](./chart/README.md).
