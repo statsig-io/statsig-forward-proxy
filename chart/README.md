@@ -25,14 +25,6 @@ helm install statsig-forward-proxy statsig/statsig-forward-proxy
 helm install statsig-forward-proxy statsig/statsig-forward-proxy -f values.yaml
 ```
 
-### Required Configuration
-
-For Statsig Forward Proxy to function correctly, you must provide your Statsig Server SDK key. You can do this in several ways:
-
-```bash
-helm install statsig-forward-proxy statsig/statsig-forward-proxy
-```
-
 ## Configurations
 
 The default values file is only intended to be a starting point of configuring Statsig Forward Proxy that works with your environment and setup. Please read the following reference and [deployment options](https://github.com/statsig-io/statsig-forward-proxy?tab=readme-ov-file#deploying) to properly configure the deployment to meet your need.
