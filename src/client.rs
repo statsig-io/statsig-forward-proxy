@@ -13,7 +13,7 @@ pub mod statsig_forward_proxy {
 fn last_500_char(spec: &str) -> String {
     // only print last 500 characters
     let len = spec.len();
-    let start = if len > 500 { len - 500 } else { 0 };
+    let start = len.saturating_sub(500);
     spec[start..].to_string()
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "statsig-forward-proxy"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2021"
 rust-version = "1.75.0"
 
@@ -45,6 +45,7 @@ tokio-util = "0.7.12"
 bytes = "1.7.2"
 flate2 = "1.0.34"
 regex = "1.11.1"
+arc-swap = "1.7.1"
 
 
 [build-dependencies]

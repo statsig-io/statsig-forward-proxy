@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use std::fmt::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -47,7 +48,12 @@ impl DataProviderTrait for HttpDataProvider {
             Ok(response) => response,
             Err(err) => {
                 return self
-                    .handle_error(format!("{:?}", err), start_time, request_context, lcut)
+                    .handle_error(
+                        Self::make_useful_error_message(&err),
+                        start_time,
+                        request_context,
+                        lcut,
+                    )
                     .await
             }
         };
@@ -59,7 +65,12 @@ impl DataProviderTrait for HttpDataProvider {
             Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), bytes),
             Err(err) => {
                 return self
-                    .handle_error(format!("{:?}", err), start_time, request_context, lcut)
+                    .handle_error(
+                        Self::make_useful_error_message(&err),
+                        start_time,
+                        request_context,
+                        lcut,
+                    )
                     .await
             }
         };
@@ -71,7 +82,7 @@ impl DataProviderTrait for HttpDataProvider {
         }
 
         if !request_builder
-            .is_an_update(&body, &request_context.sdk_key)
+            .is_an_update(&body, &headers, &request_context.sdk_key)
             .await
         {
             return self.handle_no_data(lcut, start_time, request_context).await;
@@ -101,6 +112,16 @@ static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"(secret-[a-zA-Z0-9]
 static REDACTED_STR: Lazy<Arc<str>> = Lazy::new(|| Arc::from("REDACTED"));
 
 impl HttpDataProvider {
+    // See https://github.com/seanmonstar/reqwest/discussions/2342 for why we need this
+    fn make_useful_error_message(mut err: &(dyn std::error::Error + 'static)) -> String {
+        let mut s = format!("{}", err);
+        while let Some(src) = err.source() {
+            let _ = write!(s, "\\nCaused by: {}", src);
+            err = src;
+        }
+        s
+    }
+
     async fn handle_error(
         &self,
         err_msg: String,

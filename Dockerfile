@@ -1,16 +1,30 @@
-FROM amd64/rust:1.83-alpine3.19 as builder
+FROM --platform=$BUILDPLATFORM rust:1.83-alpine3.19 AS builder
 
 RUN apk update && apk add git curl build-base autoconf automake libtool pkgconfig libressl-dev musl-dev gcc libc-dev g++ libffi-dev
 
 # Install protoc
-RUN curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v26.0/protoc-26.0-linux-x86_64.zip
-RUN unzip protoc-26.0-linux-x86_64.zip
-RUN cp ./bin/protoc /usr/bin/protoc
+ARG TARGETPLATFORM
+RUN \
+  case ${TARGETPLATFORM} in \
+    "linux/amd64") PROTO_ARCH="x86_64" ;; \
+    "linux/arm64") PROTO_ARCH="aarch_64" ;; \
+    *) echo "Unsupported architecture: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+  esac && \
+  curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v26.0/protoc-26.0-linux-${PROTO_ARCH}.zip && \
+  unzip protoc-26.0-linux-${PROTO_ARCH}.zip && \
+  cp ./bin/protoc /usr/local/bin/protoc && \
+  rm protoc-26.0-linux-${PROTO_ARCH}.zip
 
 # Download grpc-health-probe binary
-RUN curl -L -o grpc-health-probe \
-  https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.37/grpc_health_probe-linux-amd64 && \
-  chmod +x grpc-health-probe
+RUN \
+  case ${TARGETPLATFORM} in \
+    "linux/amd64") GRPC_ARCH="amd64" ;; \
+    "linux/arm64") GRPC_ARCH="arm64" ;; \
+    *) echo "Unsupported architecture: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+  esac && \
+  curl -L -o grpc-health-probe \
+  https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.37/grpc_health_probe-linux-${GRPC_ARCH} && \
+  chmod +x grpc-health-probe 
 
 # create a new empty shell project, copy dependencies
 # and install to allow caching of dependencies

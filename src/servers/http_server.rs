@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::datastore::id_list_store::GetIdListStore;
 use crate::datastore::log_event_store::LogEventStore;
 
+use crate::datastore::shared_dict_config_spec_store::get_dictionary_compressed_config_spec_and_shadow;
 use crate::datastore::shared_dict_config_spec_store::SharedDictConfigSpecStore;
 use crate::datatypes::gzip_data::LoggedBodyJSON;
 use crate::datatypes::log_event::LogEventRequest;
@@ -158,18 +159,22 @@ async fn get_download_config_specs(
 #[get("/download_config_specs/d/<dict_id>/<sdk_key_file>?<sinceTime>")]
 async fn get_download_config_specs_with_shared_dict(
     shared_dict_config_spec_store: &State<Arc<SharedDictConfigSpecStore>>,
+    config_spec_store: &State<Arc<ConfigSpecStore>>,
     dict_id: &str,
     #[allow(unused_variables)] sdk_key_file: &str,
     #[allow(non_snake_case)] sinceTime: Option<u64>,
     authorized_rc: AuthorizedRequestContextWrapper,
+    authorized_rc_cache: &State<Arc<AuthorizedRequestContextCache>>,
 ) -> RequestPayloads {
-    match shared_dict_config_spec_store
-        .get_config_spec(
-            &authorized_rc.inner(),
-            sinceTime.unwrap_or(0),
-            &Some(Arc::from(dict_id.to_string())),
-        )
-        .await
+    match get_dictionary_compressed_config_spec_and_shadow(
+        Arc::clone(authorized_rc_cache.inner()),
+        &authorized_rc.inner(),
+        shared_dict_config_spec_store.inner(),
+        config_spec_store.inner(),
+        sinceTime.unwrap_or(0),
+        &Some(Arc::from(dict_id.to_string())),
+    )
+    .await
     {
         Some(data) => {
             if *data.config.encoding == CompressionEncoder::Gzip {
