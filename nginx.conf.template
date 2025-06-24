@@ -11,7 +11,7 @@ events {
 
 http {
     error_log /var/log/nginx/error.log error;
-    proxy_cache_path {{PROXY_CACHE_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m inactive=30s use_temp_path=off;
+    proxy_cache_path {{PROXY_CACHE_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m manager_files={{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}} manager_threshold={{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}} manager_sleep={{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}} inactive=30s use_temp_path=off;
 
     server {
         listen 8000;

@@ -6,7 +6,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 
 use crate::datastore::config_spec_store::ConfigSpecStore;
-use crate::datastore::shared_dict_config_spec_store::SharedDictConfigSpecStore;
+use crate::datastore::shared_dict_config_spec_store::{
+    get_dictionary_compressed_config_spec_and_shadow, SharedDictConfigSpecStore,
+};
 use crate::datastore::{self};
 use crate::observers::http_data_provider_observer::HttpDataProviderObserver;
 use crate::observers::proxy_event_observer::ProxyEventObserver;
@@ -51,6 +53,7 @@ pub struct StatsigForwardProxyServerImpl {
     update_broadcast_cache:
         Arc<RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>>,
     rc_cache: Arc<AuthorizedRequestContextCache>,
+    max_concurrent_streams: usize,
 }
 
 impl StatsigForwardProxyServerImpl {
@@ -62,6 +65,7 @@ impl StatsigForwardProxyServerImpl {
             RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>,
         >,
         rc_cache: Arc<AuthorizedRequestContextCache>,
+        max_concurrent_streams: usize,
     ) -> Self {
         StatsigForwardProxyServerImpl {
             config_spec_store,
@@ -69,6 +73,7 @@ impl StatsigForwardProxyServerImpl {
             dcs_observer,
             update_broadcast_cache,
             rc_cache,
+            max_concurrent_streams,
         }
     }
 
@@ -110,37 +115,31 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         &self,
         request: Request<ConfigSpecRequest>,
     ) -> Result<Response<ConfigSpecResponse>, Status> {
-        let zstd_dict_id_param: Option<Arc<str>> = request
-            .get_ref()
-            .zstd_dict_id
-            .as_ref()
-            .map(|s| Arc::from(s.as_str()));
-        let result = match request.get_ref().zstd_dict_id.is_some() {
-            true => {
-                self.shared_dict_config_spec_store
-                    .get_config_spec(
-                        &self.rc_cache.get_or_insert(
-                            request.get_ref().sdk_key.to_string(),
-                            StatsigForwardProxyServerImpl::get_normalized_path_from_request(
-                                &request,
-                            ),
-                            CompressionEncoder::PlainText,
-                        ),
-                        request.get_ref().since_time.unwrap_or(0),
-                        &zstd_dict_id_param,
-                    )
-                    .await
+        let authorized_request_context = self.rc_cache.get_or_insert(
+            request.get_ref().sdk_key.to_string(),
+            StatsigForwardProxyServerImpl::get_normalized_path_from_request(&request),
+            CompressionEncoder::PlainText,
+        );
+        let result = match authorized_request_context.path {
+            NormalizedPath::V2DownloadConfigSpecsWithSharedDict => {
+                get_dictionary_compressed_config_spec_and_shadow(
+                    Arc::clone(&self.rc_cache),
+                    &authorized_request_context,
+                    &self.shared_dict_config_spec_store,
+                    &self.config_spec_store,
+                    request.get_ref().since_time.unwrap_or(0),
+                    &request
+                        .get_ref()
+                        .zstd_dict_id
+                        .as_ref()
+                        .map(|s| Arc::from(s.as_str())),
+                )
+                .await
             }
-            false => {
+            _ => {
                 self.config_spec_store
                     .get_config_spec(
-                        &self.rc_cache.get_or_insert(
-                            request.get_ref().sdk_key.to_string(),
-                            StatsigForwardProxyServerImpl::get_normalized_path_from_request(
-                                &request,
-                            ),
-                            CompressionEncoder::PlainText,
-                        ),
+                        &authorized_request_context,
                         request.get_ref().since_time.unwrap_or(0),
                     )
                     .await
@@ -168,6 +167,10 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         &self,
         request: Request<ConfigSpecRequest>,
     ) -> Result<tonic::Response<Self::StreamConfigSpecStream>, tonic::Status> {
+        if CONNECTION_COUNTER.load(Ordering::SeqCst) >= self.max_concurrent_streams {
+            return Err(Status::resource_exhausted("Max concurrent streams reached"));
+        }
+
         let sdk_key = request.get_ref().sdk_key.to_string();
         let normalized_path =
             StatsigForwardProxyServerImpl::get_normalized_path_from_request(&request);
@@ -183,6 +186,16 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         let init_value = match self.get_config_spec(request).await {
             Ok(data) => data.into_inner(),
             Err(e) => {
+                ProxyEventObserver::publish_event(
+                    ProxyEvent::new_with_rc(
+                        ProxyEventType::GrpcStreamingStreamUnauthorized,
+                        &request_context,
+                    )
+                    .with_stat(EventStat {
+                        operation_type: OperationType::IncrByValue,
+                        value: 1,
+                    }),
+                );
                 return Err(e);
             }
         };
@@ -232,7 +245,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
 
             loop {
-                match tokio::time::timeout(tokio::time::Duration::from_secs(60), rc.recv()).await {
+                match tokio::time::timeout(tokio::time::Duration::from_secs(30), rc.recv()).await {
                     Ok(Ok(maybe_csr)) => {
                         match maybe_csr {
                             Some((data, lcut, zstd_dict_id)) => {
@@ -422,6 +435,7 @@ impl GrpcServer {
             shared_dcs_observer,
             update_broadcast_cache.clone(),
             rc_cache,
+            cli.grpc_max_concurrent_streams as usize,
         );
 
         // Spawn a background task to log number of active grpc streams

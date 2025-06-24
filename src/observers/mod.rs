@@ -53,6 +53,7 @@ pub enum ProxyEventType {
     ConfigSpecStoreGotData,
     GrpcStreamingStreamedInitialized,
     GrpcStreamingStreamedResponse,
+    GrpcStreamingStreamUnauthorized,
     GrpcStreamingHealthcheckSent,
     GrpcStreamingStreamDisconnected,
     GrpcEstimatedActiveStreams,
@@ -89,6 +90,9 @@ impl std::fmt::Display for ProxyEventType {
             ProxyEventType::ConfigSpecStoreGotData => write!(f, "ConfigSpecStoreGotData"),
             ProxyEventType::GrpcStreamingStreamedInitialized => {
                 write!(f, "GrpcStreamingStreamedInitialized")
+            }
+            ProxyEventType::GrpcStreamingStreamUnauthorized => {
+                write!(f, "GrpcStreamingStreamUnauthorized")
             }
             ProxyEventType::GrpcStreamingStreamedResponse => {
                 write!(f, "GrpcStreamingStreamedResponse")

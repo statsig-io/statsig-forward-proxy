@@ -66,6 +66,8 @@ pub struct Cli {
     statsd_logging: bool,
     #[clap(long, action)]
     statsig_logging: bool,
+    #[clap(long, default_value = None, value_parser = utils::deserialization_helpers::parse_kv_pair::<String, String>, value_delimiter = ',')]
+    statsig_logging_tags: Option<Vec<(String, String)>>,
     #[clap(long, action)]
     debug_logging: bool,
     #[clap(short, long, default_value = "1000")]
@@ -145,6 +147,10 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
                 panic!("Failed to initialize statsig SDK: {}", err);
             }
 
+            if let Some(tags) = &cli.statsig_logging_tags {
+                utils::statsig_sdk_wrapper::STATSIG_USER_FACTORY.set(tags.clone());
+            }
+
             true
         }
         None => {
@@ -165,7 +171,7 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
             if enable_statsig {
                 force_enable
                     || Statsig::check_gate(
-                        &utils::statsig_sdk_wrapper::STATSIG_USER,
+                        &utils::statsig_sdk_wrapper::STATSIG_USER_FACTORY.get(),
                         "enable_gcp_profiler_for_sfp",
                     )
                     .unwrap_or(false)
@@ -178,7 +184,7 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
                 sampling_rate: 1000,
             };
             match Statsig::get_config::<CloudProfilerConfiguration>(
-                &utils::statsig_sdk_wrapper::STATSIG_USER,
+                &utils::statsig_sdk_wrapper::STATSIG_USER_FACTORY.get(),
                 "rust_cloud_profiler_configuration",
             ) {
                 Ok(config) => config.value.unwrap_or(default),
@@ -222,9 +228,6 @@ async fn create_shared_dict_config_spec_store(
         .await;
     config_spec_observer
         .add_observer(config_spec_store.clone())
-        .await;
-    config_spec_observer
-        .add_observer(Arc::clone(shared_cache))
         .await;
 
     config_spec_store

@@ -324,7 +324,7 @@ mod batching {
             .collect();
 
         Statsig::log_event(
-            &utils::statsig_sdk_wrapper::STATSIG_USER,
+            &utils::statsig_sdk_wrapper::STATSIG_USER_FACTORY.get(),
             StatsigEvent {
                 event_name: event.counter_name.clone(),
                 value: Some(event.value.into()),

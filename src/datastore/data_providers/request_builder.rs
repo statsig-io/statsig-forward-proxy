@@ -51,7 +51,12 @@ pub trait RequestBuilderTrait: Send + Sync + 'static {
         lcut: u64,
         zstd_dict_id: &Option<Arc<str>>,
     ) -> Result<reqwest::Response, reqwest::Error>;
-    async fn is_an_update(&self, body: &str, sdk_key: &str) -> bool;
+    async fn is_an_update(
+        &self,
+        body: &str,
+        headers: &reqwest::header::HeaderMap,
+        sdk_key: &str,
+    ) -> bool;
     fn get_observers(&self) -> Arc<HttpDataProviderObserver>;
     fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send>;
     async fn should_make_request(&self, rc: &Arc<AuthorizedRequestContext>) -> bool;
@@ -71,7 +76,12 @@ impl RequestBuilderTrait for NoopRequestBuilder {
         unimplemented!()
     }
 
-    async fn is_an_update(&self, _body: &str, _sdk_key: &str) -> bool {
+    async fn is_an_update(
+        &self,
+        _body: &str,
+        _headers: &reqwest::header::HeaderMap,
+        _sdk_key: &str,
+    ) -> bool {
         unimplemented!()
     }
 
@@ -148,9 +158,18 @@ impl RequestBuilderTrait for DcsRequestBuilder {
         request.send().await
     }
 
-    async fn is_an_update(&self, body: &str, _sdk_key: &str) -> bool {
-        // TODO: This should be more robust
-        !body.eq("{\"has_updates\":false}")
+    async fn is_an_update(
+        &self,
+        _body: &str,
+        headers: &reqwest::header::HeaderMap,
+        _sdk_key: &str,
+    ) -> bool {
+        // If this header is not present, we default to "Yes, this is an update"
+        // Otherwise, this header will be "true" if this is NOT an update.
+        headers
+            .get("x-cache-hit")
+            .and_then(|value| value.to_str().ok())
+            .map_or(true, |value| value == "false")
     }
 
     fn get_observers(&self) -> Arc<HttpDataProviderObserver> {
@@ -225,9 +244,18 @@ impl RequestBuilderTrait for SharedDictDcsRequestBuilder {
         request.send().await
     }
 
-    async fn is_an_update(&self, _body: &str, _sdk_key: &str) -> bool {
-        // TODO: classify responses based on response header
-        true
+    async fn is_an_update(
+        &self,
+        _body: &str,
+        headers: &reqwest::header::HeaderMap,
+        _sdk_key: &str,
+    ) -> bool {
+        // If this header is not present, we default to "Yes, this is an update"
+        // Otherwise, this header will be "true" if this is NOT an update.
+        headers
+            .get("x-cache-hit")
+            .and_then(|value| value.to_str().ok())
+            .map_or(true, |value| value == "false")
     }
 
     fn get_observers(&self) -> Arc<HttpDataProviderObserver> {
@@ -298,7 +326,12 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
         }
     }
 
-    async fn is_an_update(&self, body: &str, sdk_key: &str) -> bool {
+    async fn is_an_update(
+        &self,
+        body: &str,
+        _headers: &reqwest::header::HeaderMap,
+        sdk_key: &str,
+    ) -> bool {
         let hash = format!("{:x}", Sha256::digest(body));
         let mut wlock = self.last_response_hash.write();
         let mut is_an_update = true;

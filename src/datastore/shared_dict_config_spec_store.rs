@@ -1,4 +1,4 @@
-use super::config_spec_store::ConfigSpecForCompany;
+use super::config_spec_store::{ConfigSpecForCompany, ConfigSpecStore};
 use super::data_providers::background_data_provider::{foreground_fetch, BackgroundDataProvider};
 use super::data_providers::http_data_provider::ResponsePayload;
 use super::data_providers::{DataProviderRequestResult, FullRequestContext, ResponseContext};
@@ -7,7 +7,10 @@ use crate::observers::proxy_event_observer::ProxyEventObserver;
 use crate::observers::{
     EventStat, HttpDataProviderObserverTrait, OperationType, ProxyEvent, ProxyEventType,
 };
-use crate::servers::authorized_request_context::AuthorizedRequestContext;
+use crate::servers::authorized_request_context::{
+    AuthorizedRequestContext, AuthorizedRequestContextCache,
+};
+use crate::servers::normalized_path::NormalizedPath;
 use crate::utils::compress_encoder::CompressionEncoder;
 use bytes::Bytes;
 
@@ -137,20 +140,25 @@ impl SharedDictConfigSpecStore {
         since_time: u64,
         zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
+        let actual_dict_id = match zstd_dict_id {
+            Some(id) if id.as_ref() == "null" => None,
+            _ => zstd_dict_id.clone(),
+        };
+
         let per_dict_id_cache = self
             .store
             .entry(Arc::clone(request_context))
             .or_insert_with(|| Arc::new(RwLock::new(LruCache::new(self.per_key_cache_size))))
             .downgrade()
             .clone();
-        if !per_dict_id_cache.read().contains(zstd_dict_id) {
+        if !per_dict_id_cache.read().contains(&actual_dict_id) {
             // Since it's a cache-miss, just fill with a full payload
             // and check if we should return no update manually
             foreground_fetch(
                 self.background_data_provider.clone(),
                 request_context,
                 0,
-                zstd_dict_id,
+                &actual_dict_id,
                 // Since it's a cache-miss, it doesn't matter what we do
                 // if we receive a 4xx, so no point clearing any
                 // caches
@@ -159,7 +167,7 @@ impl SharedDictConfigSpecStore {
             .await;
         }
 
-        let record = per_dict_id_cache.read().peek(zstd_dict_id).cloned();
+        let record = per_dict_id_cache.read().peek(&actual_dict_id).cloned();
         match record {
             Some(record) => {
                 if record.lcut > since_time {
@@ -181,4 +189,34 @@ impl SharedDictConfigSpecStore {
             }
         }
     }
+}
+
+pub async fn get_dictionary_compressed_config_spec_and_shadow(
+    authorized_request_context_cache: Arc<AuthorizedRequestContextCache>,
+    shared_dict_request_context: &Arc<AuthorizedRequestContext>,
+    shared_dict_config_spec_store: &Arc<SharedDictConfigSpecStore>,
+    config_spec_store: &Arc<ConfigSpecStore>,
+    since_time: u64,
+    zstd_dict_id: &Option<Arc<str>>,
+) -> Option<Arc<ConfigSpecForCompany>> {
+    let shared_dict_request_context_clone = Arc::clone(shared_dict_request_context);
+    let config_spec_store = Arc::clone(config_spec_store);
+    tokio::spawn(async move {
+        // At the time of writing, Server SDK DataStores only support reading unencoded, uncompressed responses.
+        // Therefore, we must rely on the existing DataStore logic invoked in the existing non-shared-dictionary
+        // config spec store to keep DataStore up-to-date with uncompressed responses.
+        // This effectively shadows all requests made to /v2/download_config_specs/d/... with a request to
+        // /v2/download_config_specs
+        let shadow_request_context = authorized_request_context_cache.get_or_insert(
+            shared_dict_request_context_clone.sdk_key.clone(),
+            NormalizedPath::V2DownloadConfigSpecs,
+            CompressionEncoder::Gzip, // decompression is handled before committing to DataStore
+        );
+        let _ = config_spec_store
+            .get_config_spec(&shadow_request_context, since_time)
+            .await;
+    });
+    shared_dict_config_spec_store
+        .get_config_spec(shared_dict_request_context, since_time, zstd_dict_id)
+        .await
 }
