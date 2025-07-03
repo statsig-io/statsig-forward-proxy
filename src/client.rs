@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let sdk_key = std::env::var("STATSIG_SERVER_SDK_KEY").unwrap().to_string();
 
-    let mut client = StatsigForwardProxyClient::new(channel).max_decoding_message_size(20870203);
+    let mut client = StatsigForwardProxyClient::new(channel).max_decoding_message_size(100870203);
 
     // Non-Streaming
     for version in 0..3 {

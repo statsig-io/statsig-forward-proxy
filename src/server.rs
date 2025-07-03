@@ -2,7 +2,6 @@ use clap::ArgAction;
 use clap::Parser;
 use clap::ValueEnum;
 
-use cloud_profiler_rust::CloudProfilerConfiguration;
 use datastore::caching::disabled_cache;
 use datastore::config_spec_store::ConfigSpecStore;
 use datastore::data_providers::request_builder::CachedRequestBuilders;
@@ -137,7 +136,7 @@ enum CacheMode {
 }
 
 async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &ConfigurationAndOverrides) {
-    let enable_statsig = match &config.statsig_server_sdk_key {
+    match &config.statsig_server_sdk_key {
         Some(server_sdk_key) => {
             let opts = StatsigOptions {
                 disable_user_agent_support: true,
@@ -150,49 +149,13 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
             if let Some(tags) = &cli.statsig_logging_tags {
                 utils::statsig_sdk_wrapper::STATSIG_USER_FACTORY.set(tags.clone());
             }
-
-            true
         }
         None => {
             if cli.statsig_logging {
                 panic!("Must define statsig server sdk key if using statsig logging");
             }
-
-            false
         }
     };
-
-    let force_enable = cli.force_gcp_profiling_enabled;
-    cloud_profiler_rust::maybe_start_profiling(
-        "statsig-services".to_string(),
-        "statsig-forward-proxy".to_string(),
-        std::env::var("DD_VERSION").unwrap_or("missing_dd_version".to_string()),
-        move || {
-            if enable_statsig {
-                force_enable
-                    || Statsig::check_gate(
-                        &utils::statsig_sdk_wrapper::STATSIG_USER_FACTORY.get(),
-                        "enable_gcp_profiler_for_sfp",
-                    )
-                    .unwrap_or(false)
-            } else {
-                force_enable
-            }
-        },
-        move || {
-            let default = CloudProfilerConfiguration {
-                sampling_rate: 1000,
-            };
-            match Statsig::get_config::<CloudProfilerConfiguration>(
-                &utils::statsig_sdk_wrapper::STATSIG_USER_FACTORY.get(),
-                "rust_cloud_profiler_configuration",
-            ) {
-                Ok(config) => config.value.unwrap_or(default),
-                Err(_e) => default,
-            }
-        },
-    )
-    .await;
 }
 
 async fn create_shared_dict_config_spec_store(
