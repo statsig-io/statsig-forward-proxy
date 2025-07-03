@@ -127,6 +127,7 @@ impl BackgroundDataProvider {
         clear_datastore_on_unauthorized: bool,
     ) {
         match reqwest::Client::builder()
+            .http2_prior_knowledge()
             .timeout(Duration::from_secs(30))
             .read_timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(10))

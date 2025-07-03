@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use cached::proc_macro::once;
 use parking_lot::RwLock;
+use reqwest::Version;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 use tokio::time::{Duration, Instant};
@@ -145,6 +146,7 @@ impl RequestBuilderTrait for DcsRequestBuilder {
 
         let mut request = http_client
             .get(url)
+            .version(Version::HTTP_2)
             .header("x-sfp-version", get_package_version())
             .timeout(Duration::from_secs(30));
 
@@ -231,6 +233,7 @@ impl RequestBuilderTrait for SharedDictDcsRequestBuilder {
 
         let mut request = http_client
             .get(url)
+            .version(Version::HTTP_2)
             .header("x-sfp-version", get_package_version())
             .timeout(Duration::from_secs(30));
 
@@ -307,6 +310,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
             .header("statsig-api-key", request_context.sdk_key.clone())
             .timeout(Duration::from_secs(30))
             .body("{}".to_string())
+            .version(Version::HTTP_2)
             .send()
             .await
         {

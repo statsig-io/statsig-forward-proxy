@@ -30,6 +30,7 @@ RUN \
 # and install to allow caching of dependencies
 RUN USER=root cargo new --bin statsig_forward_proxy
 WORKDIR /statsig_forward_proxy
+COPY ./.cargo ./.cargo
 COPY ./Cargo.lock ./Cargo.lock
 COPY ./Cargo.toml ./Cargo.toml
 COPY ./rust-toolchain.toml ./rust-toolchain.toml
