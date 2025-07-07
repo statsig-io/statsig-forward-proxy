@@ -18,9 +18,9 @@ reqwest = { version = "0.12.22", default-features = false, features = ["http3", 
 futures = "0.3.31"
 envy = "0.4.2"
 serde = { version = "1.0.219", features = ["derive"] }
-redis = { version = "0.25.1", features = ["tokio-rustls-comp", "tokio-comp"] }
-bb8 = { version = "0.8.1" }
-bb8-redis = { version = "0.15.0" }
+redis = { version = "0.32.3", features = ["tokio-rustls-comp", "tokio-comp"] }
+bb8 = { version = "0.9.0" }
+bb8-redis = { version = "0.24.0" }
 async-trait = "0.1.88"
 sha2 = "0.10.9"
 lazy_static = "1.5.0"

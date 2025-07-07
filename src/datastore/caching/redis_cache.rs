@@ -1,7 +1,6 @@
 use base64::{prelude::BASE64_STANDARD, Engine};
 use bb8_redis::{redis::AsyncCommands, RedisConnectionManager};
 use parking_lot::RwLock;
-use redis::aio::MultiplexedConnection;
 use std::{
     collections::HashMap,
     io::{Cursor, Read, Write},
@@ -111,7 +110,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                 let res: Result<(Option<u64>, Vec<u8>), RedisError> = pipe
                     .hget(&redis_key, "lcut")
                     .hget(&redis_key, "config")
-                    .query_async::<MultiplexedConnection, (Option<u64>, Vec<u8>)>(&mut *conn)
+                    .query_async::<(Option<u64>, Vec<u8>)>(&mut *conn)
                     .await;
                 match res {
                     Ok((lcut, data)) => {
@@ -320,9 +319,7 @@ impl RedisCache {
                         .set_nx(REDIS_LEADER_KEY, self.uuid.clone())
                         .get(REDIS_LEADER_KEY)
                         .hget(&redis_key, "lcut")
-                        .query_async::<MultiplexedConnection, (i32, i32, String, Option<String>)>(
-                            &mut *conn,
-                        )
+                        .query_async::<(i32, i32, String, Option<String>)>(&mut *conn)
                         .await
                     {
                         Ok(query_result) => {
@@ -333,7 +330,7 @@ impl RedisCache {
                             // effort, so we don't check result
                             if query_result.0 == -1 && !is_leader {
                                 pipe.expire::<&str>(REDIS_LEADER_KEY, self.leader_key_ttl)
-                                    .query_async::<MultiplexedConnection, i32>(&mut *conn)
+                                    .query_async::<i32>(&mut *conn)
                                     .await
                                     .ok();
                             }
@@ -387,7 +384,7 @@ impl RedisCache {
                             .hset(&redis_key, "config", data_to_write)
                             .expire(&redis_key, self.redis_cache_ttl_in_s)
                             .expire(REDIS_LEADER_KEY, self.leader_key_ttl)
-                            .query_async::<MultiplexedConnection, ()>(&mut *conn)
+                            .query_async::<()>(&mut *conn)
                             .await
                         {
                             Ok(_) => {
