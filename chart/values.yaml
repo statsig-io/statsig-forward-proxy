@@ -30,7 +30,8 @@ pod:
   # Labels to add to the pod.
   labels: {}
   # Security context applied to the pod.
-  securityContext: {}
+  securityContext:
+    runAsNonRoot: true
   # PriorityClassName to apply to the pod.
   priorityClassName: ""
   # PodDisruptionBudget configuration
