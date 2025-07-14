@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1.83-alpine3.19 AS builder
+FROM --platform=$BUILDPLATFORM rust:1.88-alpine3.22 AS builder
 
 RUN apk update && apk add git curl build-base autoconf automake libtool pkgconfig libressl-dev musl-dev gcc libc-dev g++ libffi-dev
 
@@ -23,7 +23,7 @@ RUN \
     *) echo "Unsupported architecture: ${TARGETPLATFORM}" >&2; exit 1 ;; \
   esac && \
   curl -L -o grpc-health-probe \
-  https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.37/grpc_health_probe-linux-${GRPC_ARCH} && \
+  https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.39/grpc_health_probe-linux-${GRPC_ARCH} && \
   chmod +x grpc-health-probe 
 
 # create a new empty shell project, copy dependencies
