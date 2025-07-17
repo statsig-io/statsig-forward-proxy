@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1.88-alpine3.22 AS builder
+FROM --platform=$BUILDPLATFORM rust:1.88.0-alpine3.20 AS builder
 
 RUN apk update && apk add git curl build-base autoconf automake libtool pkgconfig libressl-dev musl-dev gcc libc-dev g++ libffi-dev
 
