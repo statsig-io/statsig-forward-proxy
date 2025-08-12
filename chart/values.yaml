@@ -86,6 +86,10 @@ ingress:
       paths:
         - path: /
           pathType: ImplementationSpecific
+          # Use portName to reference service port by name (recommended)
+          portName: http
+          # Or use port to reference service port by number
+          # port: 8000
   tls: []
 
 resources: {}
