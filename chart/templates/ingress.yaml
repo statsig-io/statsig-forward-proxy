@@ -37,10 +37,12 @@ spec:
               service:
                 name: {{ include "chart.fullname" $ }}
                 port:
-                  {{- if .port }}
+                  {{- if .portName }}
+                  name: {{ .portName }}
+                  {{- else if .port }}
                   number: {{ .port }}
                   {{- else }}
-                  number: {{ (index $.Values.service.ports 0).port }}
+                  name: {{ (index $.Values.service.ports 0).name }}
                   {{- end }}
           {{- end }}
     {{- end }}
