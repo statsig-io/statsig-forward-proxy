@@ -25,6 +25,8 @@ pub struct BackgroundDataProvider {
     sdk_key_store: Arc<SdkKeyStore>,
     foreground_fetch_lock: DashMap<ForegroundFetchLockKey, Arc<RwLock<bool>>>,
     clear_datastore_on_unauthorized: bool,
+    http_connection_pool_max_idle_per_host: usize,
+    enable_http2: bool,
 }
 
 pub async fn foreground_fetch(
@@ -58,6 +60,8 @@ pub async fn foreground_fetch(
                 &bdp.http_data_prover,
                 1,
                 clear_datastore_on_unauthorized,
+                bdp.http_connection_pool_max_idle_per_host,
+                bdp.enable_http2,
             )
             .await;
 
@@ -78,6 +82,8 @@ impl BackgroundDataProvider {
         update_batch_size: u64,
         sdk_key_store: Arc<SdkKeyStore>,
         clear_datastore_on_unauthorized: bool,
+        http_connection_pool_max_idle_per_host: usize,
+        enable_http2: bool,
     ) -> Self {
         BackgroundDataProvider {
             http_data_prover: data_provider,
@@ -86,6 +92,8 @@ impl BackgroundDataProvider {
             foreground_fetch_lock: DashMap::new(),
             sdk_key_store,
             clear_datastore_on_unauthorized,
+            http_connection_pool_max_idle_per_host,
+            enable_http2,
         }
     }
 
@@ -96,6 +104,8 @@ impl BackgroundDataProvider {
         let sdk_key_store = Arc::clone(&self.sdk_key_store);
         let graceful_shutdown_token = GRACEFUL_SHUTDOWN_TOKEN.clone();
         let clear_datastore_on_unauthorized = self.clear_datastore_on_unauthorized;
+        let http_connection_pool_max_idle_per_host = self.http_connection_pool_max_idle_per_host;
+        let enable_http2 = self.enable_http2;
         rocket::tokio::task::spawn_blocking(move || {
             Handle::current().block_on(async move {
                 loop {
@@ -104,6 +114,8 @@ impl BackgroundDataProvider {
                         &shared_data_provider,
                         batch_size,
                         clear_datastore_on_unauthorized,
+                        http_connection_pool_max_idle_per_host,
+                        enable_http2,
                     )
                     .await;
 
@@ -125,15 +137,18 @@ impl BackgroundDataProvider {
         data_provider: &Arc<HttpDataProvider>,
         update_batch_size: u64,
         clear_datastore_on_unauthorized: bool,
+        http_connection_pool_max_idle_per_host: usize,
+        enable_http2: bool,
     ) {
-        match reqwest::Client::builder()
-            .http2_prior_knowledge()
+        let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .read_timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(10))
-            .pool_max_idle_per_host(0)
-            .build()
-        {
+            .pool_max_idle_per_host(http_connection_pool_max_idle_per_host);
+        if enable_http2 {
+            builder = builder.http2_prior_knowledge();
+        }
+        match builder.build() {
             Ok(http_client) => {
                 let mut join_handles = Vec::with_capacity(update_batch_size as usize);
 
@@ -187,10 +202,7 @@ impl BackgroundDataProvider {
                 futures::future::join_all(join_handles).await;
             }
             Err(e) => {
-                eprintln!(
-                    "Failed to build http client.. skipping background update...: {}",
-                    e
-                );
+                eprintln!("Failed to build http client.. skipping background update...: {e}");
             }
         }
     }

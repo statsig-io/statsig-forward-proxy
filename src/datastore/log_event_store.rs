@@ -30,7 +30,7 @@ pub struct LogEventStore {
 impl LogEventStore {
     pub fn new(base_url: &str, http_client: reqwest::Client, dedupe_cache_limit: usize) -> Self {
         LogEventStore {
-            url: format!("{}/v1/log_event", base_url),
+            url: format!("{base_url}/v1/log_event"),
             http_client,
             random_state: RandomState::new(),
             dedupe_cache: Arc::new(DashMap::new()),
@@ -142,7 +142,7 @@ impl LogEventStore {
         if let Some(user) = &event.user {
             if let Some(Value::Object(map)) = &user.custom_ids {
                 for (k, v) in map.iter() {
-                    write!(&mut exposure_key, "{}:{};", k, v).expect("Writing should never fail");
+                    write!(&mut exposure_key, "{k}:{v};").expect("Writing should never fail");
                 }
             }
         }
@@ -174,7 +174,7 @@ impl LogEventStore {
             .or(event.time);
 
         if let Some(time) = time_millis {
-            write!(&mut exposure_key, ";t{}", time).expect("Writing should never fail")
+            write!(&mut exposure_key, ";t{time}").expect("Writing should never fail")
         }
 
         Some(exposure_key)
