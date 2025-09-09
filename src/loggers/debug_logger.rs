@@ -19,7 +19,7 @@ impl DebugLogger {
 impl ProxyEventObserverTrait for DebugLogger {
     async fn handle_event(&self, event: &ProxyEvent) {
         println!(
-            "[Debug][Event: {:?}] sdk_key: {:?}, lcut: {}, zdict_id: {:?}, stat: {:?}, path: {:?}",
+            "[Debug][Event: {:?}] sdk_key: {:?}, lcut: {}, zdict_id: {:?}, stat: {:?}, path: {:?}, accept-encodings: {:?}, response-encoding: {:?}",
             event.event_type,
             event.get_sdk_key(),
             match event.lcut {
@@ -31,7 +31,9 @@ impl ProxyEventObserverTrait for DebugLogger {
                 None => "None".to_string(),
             },
             event.stat,
-            event.get_path()
+            event.get_path(),
+            event.get_accept_encodings(),
+            event.response_encoding,
         );
     }
 }

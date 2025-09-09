@@ -36,6 +36,8 @@ use crate::servers::authorized_request_context::AuthorizedRequestContext;
 use crate::GRACEFUL_SHUTDOWN_TOKEN;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+const NO_UPDATE_JSON: &str = "{\"has_updates\":false}";
+
 pub mod statsig_forward_proxy {
     tonic::include_proto!("statsig_forward_proxy");
 }
@@ -50,6 +52,7 @@ pub struct StatsigForwardProxyServerImpl {
     shared_dict_config_spec_store:
         Arc<datastore::shared_dict_config_spec_store::SharedDictConfigSpecStore>,
     dcs_observer: Arc<HttpDataProviderObserver>,
+    shared_dict_dcs_observer: Arc<HttpDataProviderObserver>,
     update_broadcast_cache:
         Arc<RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>>,
     rc_cache: Arc<AuthorizedRequestContextCache>,
@@ -61,6 +64,7 @@ impl StatsigForwardProxyServerImpl {
         config_spec_store: Arc<ConfigSpecStore>,
         shared_dict_config_spec_store: Arc<SharedDictConfigSpecStore>,
         dcs_observer: Arc<HttpDataProviderObserver>,
+        shared_dict_dcs_observer: Arc<HttpDataProviderObserver>,
         update_broadcast_cache: Arc<
             RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>,
         >,
@@ -71,6 +75,7 @@ impl StatsigForwardProxyServerImpl {
             config_spec_store,
             shared_dict_config_spec_store,
             dcs_observer,
+            shared_dict_dcs_observer,
             update_broadcast_cache,
             rc_cache,
             max_concurrent_streams,
@@ -118,7 +123,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         let authorized_request_context = self.rc_cache.get_or_insert(
             request.get_ref().sdk_key.to_string(),
             StatsigForwardProxyServerImpl::get_normalized_path_from_request(&request),
-            CompressionEncoder::PlainText,
+            vec![CompressionEncoder::PlainText],
         );
         let result = match authorized_request_context.path {
             NormalizedPath::V2DownloadConfigSpecsWithSharedDict => {
@@ -152,7 +157,11 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             }
         };
         let reply = ConfigSpecResponse {
-            spec: unsafe { String::from_utf8_unchecked(data.config.data.to_vec()) },
+            spec: if Arc::ptr_eq(&data.config, &self.config_spec_store.no_update_config) {
+                NO_UPDATE_JSON.to_string()
+            } else {
+                unsafe { String::from_utf8_unchecked(data.config.data.to_vec()) }
+            },
             last_updated: data.lcut,
             zstd_dict_id: data.zstd_dict_id.as_ref().map(|s| s.to_string()),
         };
@@ -174,9 +183,11 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         let sdk_key = request.get_ref().sdk_key.to_string();
         let normalized_path =
             StatsigForwardProxyServerImpl::get_normalized_path_from_request(&request);
-        let request_context =
-            self.rc_cache
-                .get_or_insert(sdk_key, normalized_path, CompressionEncoder::PlainText);
+        let request_context = self.rc_cache.get_or_insert(
+            sdk_key,
+            normalized_path,
+            vec![CompressionEncoder::PlainText],
+        );
 
         let (tx, rx) = mpsc::channel(1);
         // Get initial DCS on first request
@@ -215,8 +226,12 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                 let sc = Arc::new(StreamingChannel::new(Arc::clone(&request_context)));
                 let streaming_channel_trait: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> =
                     sc.clone();
+                let streaming_channel_trait_clone = streaming_channel_trait.clone();
                 self.dcs_observer
                     .add_observer(streaming_channel_trait)
+                    .await;
+                self.shared_dict_dcs_observer
+                    .add_observer(streaming_channel_trait_clone)
                     .await;
                 let rv = sc.sender.read().await.subscribe();
                 wlock.insert(Arc::clone(&request_context), sc);
@@ -227,7 +242,6 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
 
         // After initial response, then start listening for updates
         let ubc_ref = Arc::clone(&self.update_broadcast_cache);
-        let no_update = Arc::clone(&self.config_spec_store.no_update_config);
         let mut latest_lcut = init_value.last_updated;
         let mut latest_zstd_dict_id = init_value.zstd_dict_id.as_ref().map(|s| s.to_string());
         rocket::tokio::spawn(async move {
@@ -284,7 +298,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                         }
                     }
                     Ok(Err(e)) => {
-                        eprintln!("Error on broadcast receiver: {:?}", e);
+                        eprintln!("Error on broadcast receiver: {e:?}");
                         rc = ubc_ref
                             .read()
                             .await
@@ -298,9 +312,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                     Err(_) => {
                         match tx
                             .send(Ok(ConfigSpecResponse {
-                                spec: unsafe {
-                                    String::from_utf8_unchecked(no_update.data.to_vec())
-                                },
+                                spec: NO_UPDATE_JSON.to_string(),
                                 last_updated: latest_lcut,
                                 zstd_dict_id: latest_zstd_dict_id.clone(),
                             }))
@@ -424,6 +436,7 @@ impl GrpcServer {
         config_spec_store: Arc<ConfigSpecStore>,
         shared_dict_config_spec_store: Arc<SharedDictConfigSpecStore>,
         shared_dcs_observer: Arc<HttpDataProviderObserver>,
+        shared_dict_dcs_observer: Arc<HttpDataProviderObserver>,
         rc_cache: Arc<AuthorizedRequestContextCache>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let http_addr = "0.0.0.0:50051".parse().unwrap();
@@ -433,6 +446,7 @@ impl GrpcServer {
             config_spec_store,
             shared_dict_config_spec_store,
             shared_dcs_observer,
+            shared_dict_dcs_observer,
             update_broadcast_cache.clone(),
             rc_cache,
             cli.grpc_max_concurrent_streams as usize,
@@ -466,12 +480,12 @@ impl GrpcServer {
             cli.enforce_tls,
         ) {
             (false, _) => {
-                println!("GrpcServer listening on {} (HTTP)", http_addr);
+                println!("GrpcServer listening on {http_addr} (HTTP)");
                 Self::create_http_server(cli, sfp_server, http_addr, update_broadcast_cache.clone())
                     .await?
             }
             (true, true) => {
-                println!("GrpcServer listening on {} (HTTPS)", http_addr);
+                println!("GrpcServer listening on {http_addr} (HTTPS)");
                 Self::create_https_server(
                     cli,
                     sfp_server.clone(),
@@ -494,20 +508,19 @@ impl GrpcServer {
                     update_broadcast_cache.clone(),
                 );
                 println!(
-                    "[SFP] GrpcServer listening on {} (HTTPS) and {} (HTTP)",
-                    https_addr, http_addr
+                    "[SFP] GrpcServer listening on {https_addr} (HTTPS) and {http_addr} (HTTP)"
                 );
 
                 // Use select! to run both servers concurrently
                 tokio::select! {
                     https_result = https_server => {
                         if let Err(e) = https_result {
-                            eprintln!("HTTPS server error: {:?}", e);
+                            eprintln!("HTTPS server error: {e:?}");
                         }
                     }
                     http_result = http_server => {
                         if let Err(e) = http_result {
-                            eprintln!("HTTP server error: {:?}", e);
+                            eprintln!("HTTP server error: {e:?}");
                         }
                     }
                 }
@@ -552,7 +565,10 @@ impl GrpcServer {
                 cli.grpc_max_concurrent_streams,
                 cli.grpc_ready_endpoint_percentage_of_total_streams_threshold,
             )))
-            .add_service(StatsigForwardProxyServer::new(sfp_server))
+            .add_service(
+                StatsigForwardProxyServer::new(sfp_server)
+                    .max_decoding_message_size(20 * 1024 * 1024),
+            )
             .serve_with_shutdown(addr, GrpcServer::shutdown_signal(update_broadcast_cache))
             .await?;
         Ok(())

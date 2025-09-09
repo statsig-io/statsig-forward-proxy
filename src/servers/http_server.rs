@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::datastore::id_list_store::GetIdListStore;
 use crate::datastore::log_event_store::LogEventStore;
+use crate::datastore::sdk_key_store::SdkKeyStore;
 
 use crate::datastore::shared_dict_config_spec_store::get_dictionary_compressed_config_spec_and_shadow;
 use crate::datastore::shared_dict_config_spec_store::SharedDictConfigSpecStore;
@@ -15,12 +16,14 @@ use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{ProxyEvent, ProxyEventType};
 use crate::servers::http_apis;
+use crate::utils::compress_encoder::convert_compression_encodings_from_header_map;
 use crate::utils::compress_encoder::CompressionEncoder;
 use crate::Cli;
 use bytes::Bytes;
 
 use cached::proc_macro::once;
 
+use rocket::config::{MutualTls, TlsConfig};
 use rocket::fairing::AdHoc;
 
 use rocket::http::ContentType;
@@ -94,6 +97,7 @@ where
 
 enum RequestPayloads {
     Gzipped(Arc<Bytes>, u64, Option<Arc<str>>),
+    Brotli(Arc<Bytes>, u64, Option<Arc<str>>),
     Plain(Arc<Bytes>, u64, Option<Arc<str>>),
     Unauthorized(),
 }
@@ -105,6 +109,17 @@ impl<'r> Responder<'r, 'static> for RequestPayloads {
                 .status(Status::Ok)
                 .header(ContentType::JSON)
                 .header(rocket::http::Header::new("Content-Encoding", "gzip"))
+                .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
+                .header(rocket::http::Header::new(
+                    "x-compression-dict",
+                    zstd_dict_id.clone().unwrap_or("".into()).to_string(),
+                ))
+                .sized_body(data.len(), Cursor::new(DerefRef(data)))
+                .ok(),
+            RequestPayloads::Brotli(data, lcut, zstd_dict_id) => Response::build()
+                .status(Status::Ok)
+                .header(ContentType::JSON)
+                .header(rocket::http::Header::new("Content-Encoding", "br"))
                 .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
                 .header(rocket::http::Header::new(
                     "x-compression-dict",
@@ -148,6 +163,8 @@ async fn get_download_config_specs(
         Some(data) => {
             if *data.config.encoding == CompressionEncoder::Gzip {
                 RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut, None)
+            } else if *data.config.encoding == CompressionEncoder::Brotli {
+                RequestPayloads::Brotli(Arc::clone(&data.config.data), data.lcut, None)
             } else {
                 RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut, None)
             }
@@ -267,7 +284,7 @@ async fn post_log_event(
 
 pub struct HttpServer {}
 
-pub struct SdkKeyCache(pub RwLock<HashMap<String, String>>);
+pub struct SdkKeyCache(pub Arc<RwLock<HashMap<String, String>>>);
 
 impl HttpServer {
     pub async fn start_server(
@@ -277,9 +294,171 @@ impl HttpServer {
         log_event_store: Arc<LogEventStore>,
         id_list_store: Arc<GetIdListStore>,
         rc_cache: Arc<AuthorizedRequestContextCache>,
+        sdk_key_store: Arc<SdkKeyStore>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let sdk_key_cache = SdkKeyCache(RwLock::new(HashMap::new()));
+        let sdk_key_cache = Arc::new(SdkKeyCache(Arc::new(RwLock::new(HashMap::new()))));
 
+        match (
+            &cli.x509_server_cert_path,
+            &cli.x509_server_key_path,
+            cli.enforce_tls,
+        ) {
+            (None, _, _) | (_, None, _) => {
+                Self::create_http_server(
+                    cli,
+                    config_spec_store,
+                    shared_dict_config_spec_store,
+                    log_event_store,
+                    id_list_store,
+                    rc_cache,
+                    sdk_key_store,
+                    sdk_key_cache,
+                )
+                .await?
+            }
+            (Some(cert_path), Some(key_path), true) => {
+                Self::create_https_server(
+                    cli,
+                    config_spec_store,
+                    shared_dict_config_spec_store,
+                    log_event_store,
+                    id_list_store,
+                    rc_cache,
+                    sdk_key_store,
+                    sdk_key_cache,
+                    cert_path,
+                    key_path,
+                )
+                .await?
+            }
+            (Some(cert_path), Some(key_path), false) => {
+                let https_server = Self::create_https_server(
+                    cli,
+                    config_spec_store.clone(),
+                    shared_dict_config_spec_store.clone(),
+                    log_event_store.clone(),
+                    id_list_store.clone(),
+                    rc_cache.clone(),
+                    sdk_key_store.clone(),
+                    sdk_key_cache.clone(),
+                    cert_path,
+                    key_path,
+                );
+                let http_server = Self::create_http_server(
+                    cli,
+                    config_spec_store,
+                    shared_dict_config_spec_store,
+                    log_event_store,
+                    id_list_store,
+                    rc_cache,
+                    sdk_key_store,
+                    sdk_key_cache,
+                );
+
+                // Use select! to run both servers concurrently
+                tokio::select! {
+                    https_result = https_server => {
+                        if let Err(e) = https_result {
+                            eprintln!("HTTPS server error: {e:?}");
+                        }
+                    }
+                    http_result = http_server => {
+                        if let Err(e) = http_result {
+                            eprintln!("HTTP server error: {e:?}");
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn create_http_server(
+        cli: &Cli,
+        config_spec_store: Arc<ConfigSpecStore>,
+        shared_dict_config_spec_store: Arc<SharedDictConfigSpecStore>,
+        log_event_store: Arc<LogEventStore>,
+        id_list_store: Arc<GetIdListStore>,
+        rc_cache: Arc<AuthorizedRequestContextCache>,
+        sdk_key_store: Arc<SdkKeyStore>,
+        sdk_key_cache: Arc<SdkKeyCache>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = rocket::Config::default();
+        config.port = 8001;
+        let http_addr = format!("{}:{}", config.address, config.port);
+        println!("HTTP Server listening on http://{http_addr} (HTTP)");
+
+        Self::build_rocket(
+            config_spec_store,
+            shared_dict_config_spec_store,
+            log_event_store,
+            id_list_store,
+            rc_cache,
+            sdk_key_store,
+            Arc::clone(&sdk_key_cache),
+            cli.clone(),
+        )
+        .configure(config)
+        .launch()
+        .await?;
+
+        Ok(())
+    }
+
+    async fn create_https_server(
+        cli: &Cli,
+        config_spec_store: Arc<ConfigSpecStore>,
+        shared_dict_config_spec_store: Arc<SharedDictConfigSpecStore>,
+        log_event_store: Arc<LogEventStore>,
+        id_list_store: Arc<GetIdListStore>,
+        rc_cache: Arc<AuthorizedRequestContextCache>,
+        sdk_key_store: Arc<SdkKeyStore>,
+        sdk_key_cache: Arc<SdkKeyCache>,
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = rocket::Config::default();
+        config.port = 8443;
+        let https_addr = format!("{}:{}", config.address, config.port);
+        println!("HTTPS Server listening on https://{https_addr} (HTTPS)");
+
+        let mut tls_config = TlsConfig::from_paths(cert_path, key_path);
+        
+        if let Some(ca_path) = cli.x509_client_cert_path.as_ref() {
+            let mtls = MutualTls::from_path(ca_path).mandatory(cli.enforce_mtls);
+            tls_config = tls_config.with_mutual(mtls);
+        }
+        
+        config.tls = Some(tls_config);
+
+        Self::build_rocket(
+            config_spec_store,
+            shared_dict_config_spec_store,
+            log_event_store,
+            id_list_store,
+            rc_cache,
+            sdk_key_store,
+            Arc::clone(&sdk_key_cache),
+            cli.clone(),
+        )
+        .configure(config)
+        .launch()
+        .await?;
+
+        Ok(())
+    }
+
+    fn build_rocket(
+        config_spec_store: Arc<ConfigSpecStore>,
+        shared_dict_config_spec_store: Arc<SharedDictConfigSpecStore>,
+        log_event_store: Arc<LogEventStore>,
+        id_list_store: Arc<GetIdListStore>,
+        rc_cache: Arc<AuthorizedRequestContextCache>,
+        sdk_key_store: Arc<SdkKeyStore>,
+        sdk_key_cache: Arc<SdkKeyCache>,
+        cli: Cli,
+    ) -> rocket::Rocket<rocket::Build> {
         rocket::build()
             .mount(
                 "/v1",
@@ -306,8 +485,9 @@ impl HttpServer {
             .manage(log_event_store)
             .manage(id_list_store)
             .manage(rc_cache)
-            .manage(sdk_key_cache)
-            .manage(cli.clone())
+            .manage(sdk_key_store)
+            .manage(Arc::clone(&sdk_key_cache))
+            .manage(cli)
             .attach(AdHoc::on_request("Normalize SDK Key", |req, _| {
                 Box::pin(async move {
                     req.local_cache(|| TimerStart(Some(Instant::now())));
@@ -318,7 +498,7 @@ impl HttpServer {
 
                     if req.method() == rocket::http::Method::Get {
                         let path = req.uri().path().to_string();
-                        let sdk_key_cache = req.rocket().state::<SdkKeyCache>().unwrap();
+                        let sdk_key_cache = req.rocket().state::<Arc<SdkKeyCache>>().unwrap();
 
                         // Try to read from the cache first
                         if let Some(sdk_key) = sdk_key_cache.0.read().await.get(&path).cloned() {
@@ -360,15 +540,9 @@ impl HttpServer {
                         .get_one("statsig-api-key")
                         .unwrap_or("no-key-provided")
                         .to_string();
-                    let encoding = if req
-                        .headers()
-                        .get("Accept-Encoding")
-                        .any(|v| v.to_lowercase().contains("gzip"))
-                    {
-                        CompressionEncoder::Gzip
-                    } else {
-                        CompressionEncoder::PlainText
-                    };
+                    let encodings = convert_compression_encodings_from_header_map(
+                        req.headers().get("Accept-Encoding"),
+                    );
                     let lcut = resp
                         .headers()
                         .get_one("x-since-time")
@@ -381,10 +555,10 @@ impl HttpServer {
                     let path = NormalizedPath::from(req.uri().path().as_str());
                     let status_code = resp.status().code;
                     let status_class = resp.status().class();
-
+                    let content_encoding = resp.headers().get("Content-Encoding").collect();
                     // Spawn a new task to handle logging
                     tokio::spawn(async move {
-                        let request_context = cache.get_or_insert(sdk_key, path, encoding);
+                        let request_context = cache.get_or_insert(sdk_key, path, encodings);
 
                         let event = ProxyEvent::new_with_rc(
                             if status_class == StatusClass::Success {
@@ -396,6 +570,7 @@ impl HttpServer {
                         )
                         .with_status_code(status_code)
                         .with_lcut(lcut)
+                        .with_response_encoding(content_encoding)
                         .with_zstd_dict_id(zstd_dict_id.map(Arc::from))
                         .with_stat(EventStat {
                             operation_type: OperationType::Distribution,
@@ -407,8 +582,5 @@ impl HttpServer {
                 })
             }))
             .register("/", catchers![default_catcher])
-            .launch()
-            .await?;
-        Ok(())
     }
 }

@@ -65,8 +65,8 @@ WORKDIR /app
 # Set environment variable
 ENV ROCKET_ENV=prod
 
-# Expose port 8001 for Nginx and 8000 for the proxy
-EXPOSE 8000 8001
+# Expose Nginx HTTP(8000)/HTTPS(4443) and SFP HTTP(8001)/HTTPS(8443)
+EXPOSE 8000 4443 8001 8443
 
 # Copy Nginx configuration
 COPY nginx.conf.template /nginx.conf.template
