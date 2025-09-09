@@ -117,7 +117,7 @@ impl ConfigSpecStore {
             background_data_provider,
             no_update_config: Arc::new(ResponsePayload {
                 encoding: Arc::new(CompressionEncoder::PlainText),
-                data: Arc::new(Bytes::from("{\"has_updates\":false}".to_string())),
+                data: Arc::new(Bytes::from_static(b"{\"has_updates\":false}")),
             }),
         }
     }

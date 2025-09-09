@@ -14,7 +14,7 @@ use crate::{
     servers::{
         authorized_request_context::AuthorizedRequestContext, normalized_path::NormalizedPath,
     },
-    utils::compress_encoder::CompressionEncoder,
+    utils::compress_encoder::{format_compression_encodings, CompressionEncoder},
 };
 
 use once_cell::sync::Lazy;
@@ -54,7 +54,7 @@ pub trait RequestBuilderTrait: Send + Sync + 'static {
     ) -> Result<reqwest::Response, reqwest::Error>;
     async fn is_an_update(
         &self,
-        body: &str,
+        body: &[u8],
         headers: &reqwest::header::HeaderMap,
         sdk_key: &str,
     ) -> bool;
@@ -79,7 +79,7 @@ impl RequestBuilderTrait for NoopRequestBuilder {
 
     async fn is_an_update(
         &self,
-        _body: &str,
+        _body: &[u8],
         _headers: &reqwest::header::HeaderMap,
         _sdk_key: &str,
     ) -> bool {
@@ -150,10 +150,10 @@ impl RequestBuilderTrait for DcsRequestBuilder {
             .header("x-sfp-version", get_package_version())
             .timeout(Duration::from_secs(30));
 
-        if request_context.encoding != CompressionEncoder::PlainText {
+        if request_context.encodings != vec![CompressionEncoder::PlainText] {
             request = request.header(
                 reqwest::header::ACCEPT_ENCODING,
-                request_context.encoding.to_string(),
+                format_compression_encodings(&request_context.encodings),
             );
         }
 
@@ -162,7 +162,7 @@ impl RequestBuilderTrait for DcsRequestBuilder {
 
     async fn is_an_update(
         &self,
-        _body: &str,
+        _body: &[u8],
         headers: &reqwest::header::HeaderMap,
         _sdk_key: &str,
     ) -> bool {
@@ -171,7 +171,7 @@ impl RequestBuilderTrait for DcsRequestBuilder {
         headers
             .get("x-cache-hit")
             .and_then(|value| value.to_str().ok())
-            .map_or(true, |value| value == "false")
+            .is_none_or(|value| value == "false")
     }
 
     fn get_observers(&self) -> Arc<HttpDataProviderObserver> {
@@ -228,7 +228,7 @@ impl RequestBuilderTrait for SharedDictDcsRequestBuilder {
         };
 
         if lcut != 0 {
-            url.push_str(&format!("?sinceTime={}", lcut));
+            url.push_str(&format!("?sinceTime={lcut}"));
         }
 
         let mut request = http_client
@@ -237,10 +237,10 @@ impl RequestBuilderTrait for SharedDictDcsRequestBuilder {
             .header("x-sfp-version", get_package_version())
             .timeout(Duration::from_secs(30));
 
-        if request_context.encoding != CompressionEncoder::PlainText {
+        if request_context.encodings != vec![CompressionEncoder::PlainText] {
             request = request.header(
                 reqwest::header::ACCEPT_ENCODING,
-                request_context.encoding.to_string(),
+                format_compression_encodings(&request_context.encodings),
             );
         }
 
@@ -249,7 +249,7 @@ impl RequestBuilderTrait for SharedDictDcsRequestBuilder {
 
     async fn is_an_update(
         &self,
-        _body: &str,
+        _body: &[u8],
         headers: &reqwest::header::HeaderMap,
         _sdk_key: &str,
     ) -> bool {
@@ -258,7 +258,7 @@ impl RequestBuilderTrait for SharedDictDcsRequestBuilder {
         headers
             .get("x-cache-hit")
             .and_then(|value| value.to_str().ok())
-            .map_or(true, |value| value == "false")
+            .is_none_or(|value| value == "false")
     }
 
     fn get_observers(&self) -> Arc<HttpDataProviderObserver> {
@@ -332,7 +332,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
 
     async fn is_an_update(
         &self,
-        body: &str,
+        body: &[u8],
         _headers: &reqwest::header::HeaderMap,
         sdk_key: &str,
     ) -> bool {

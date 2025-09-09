@@ -142,6 +142,7 @@ pub struct ProxyEvent {
     pub zstd_dict_id: Option<Arc<str>>,
     pub stat: Option<EventStat>,
     pub status_code: Option<u16>,
+    pub response_encoding: Option<String>,
 }
 
 impl ProxyEvent {
@@ -156,6 +157,7 @@ impl ProxyEvent {
             zstd_dict_id: None,
             stat: None,
             status_code: None,
+            response_encoding: None,
         }
     }
 
@@ -167,6 +169,7 @@ impl ProxyEvent {
             zstd_dict_id: None,
             stat: None,
             status_code: None,
+            response_encoding: None,
         }
     }
 
@@ -198,6 +201,17 @@ impl ProxyEvent {
 
     pub fn get_path(&self) -> Option<&str> {
         self.request_context.as_ref().map(|rc| rc.path.as_str())
+    }
+
+    pub fn get_accept_encodings(&self) -> Option<String> {
+        self.request_context
+            .as_ref()
+            .map(|rc| format!("{:?}", rc.encodings))
+    }
+
+    pub fn with_response_encoding(mut self, encoding: String) -> Self {
+        self.response_encoding = Some(encoding);
+        self
     }
 
     pub fn with_lcut(mut self, lcut: u64) -> Self {

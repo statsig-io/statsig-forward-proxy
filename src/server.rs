@@ -64,6 +64,8 @@ pub struct Cli {
     #[clap(long, action)]
     statsd_logging: bool,
     #[clap(long, action)]
+    otlp_logging: bool,
+    #[clap(long, action)]
     statsig_logging: bool,
     #[clap(long, default_value = None, value_parser = utils::deserialization_helpers::parse_kv_pair::<String, String>, value_delimiter = ',')]
     statsig_logging_tags: Option<Vec<(String, String)>>,
@@ -112,6 +114,10 @@ pub struct Cli {
     enforce_tls: bool,
     #[clap(long, default_value = "false")]
     enforce_mtls: bool,
+    #[clap(long, default_value = "10")]
+    http_connection_pool_max_idle_per_host: usize,
+    #[clap(long, action = ArgAction::Set, default_value = "true")]
+    enable_http2: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -143,7 +149,7 @@ async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &Configurat
                 ..StatsigOptions::default()
             };
             if let Some(err) = Statsig::initialize_with_options(server_sdk_key, opts).await {
-                panic!("Failed to initialize statsig SDK: {}", err);
+                panic!("Failed to initialize statsig SDK: {err}");
             }
 
             if let Some(tags) = &cli.statsig_logging_tags {
@@ -290,12 +296,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     try_initialize_statsig_sdk_and_profiling(&cli, &overrides).await;
 
     println!("[SFP] Initializing event observers...");
-    if cli.datadog_logging || cli.statsd_logging || cli.statsig_logging {
+    if cli.datadog_logging || cli.statsd_logging || cli.statsig_logging || cli.otlp_logging {
         let stats_logger = Arc::new(
             stats_logger::StatsLogger::new(
                 cli.statsd_logging,
                 cli.datadog_logging,
                 cli.statsig_logging,
+                cli.otlp_logging,
             )
             .await,
         );
@@ -315,6 +322,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.update_batch_size,
         Arc::clone(&sdk_key_store),
         cli.clear_datastore_on_unauthorized,
+        cli.http_connection_pool_max_idle_per_host,
+        cli.enable_http2,
     ));
     let cache_uuid = Uuid::new_v4().to_string();
 
@@ -387,6 +396,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(cli.http_connection_pool_max_idle_per_host)
         .build()
         .expect("We must have an http client");
     let log_event_store = create_log_event_store(http_client.clone(), &overrides).await;
@@ -402,6 +412,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config_spec_store,
                 shared_dict_config_spec_store,
                 config_spec_observer,
+                shared_dict_config_spec_observer,
                 rc_cache,
             )
             .await?
@@ -414,6 +425,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log_event_store,
                 id_list_store,
                 rc_cache,
+                sdk_key_store.clone(),
             )
             .await?
         }
@@ -423,6 +435,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config_spec_store.clone(),
                 shared_dict_config_spec_store.clone(),
                 config_spec_observer.clone(),
+                shared_dict_config_spec_observer.clone(),
                 rc_cache.clone(),
             );
             let http_server = servers::http_server::HttpServer::start_server(
@@ -432,6 +445,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log_event_store,
                 id_list_store,
                 rc_cache,
+                sdk_key_store.clone(),
             );
             join!(async { grpc_server.await.ok() }, async {
                 http_server.await.ok()

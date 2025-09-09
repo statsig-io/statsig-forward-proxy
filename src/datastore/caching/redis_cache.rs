@@ -138,17 +138,21 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                     value: 1,
                                 }),
                             );
-                            match request_context.encoding == CompressionEncoder::Gzip {
+                            // TODO: Rethink the decision here
+                            match request_context
+                                .encodings
+                                .contains(&CompressionEncoder::Gzip)
+                            {
                                 true => {
                                     let mut compressed = Vec::new();
                                     let mut encoder =
                                         GzEncoder::new(&mut compressed, Compression::best());
                                     if let Err(e) = encoder.write_all(&data) {
-                                        eprintln!("Failed to gzip data from redis: {:?}", e);
+                                        eprintln!("Failed to gzip data from redis: {e:?}");
                                         return None;
                                     }
                                     if let Err(e) = encoder.finish() {
-                                        eprintln!("Failed to gzip data from redis: {:?}", e);
+                                        eprintln!("Failed to gzip data from redis: {e:?}");
                                         return None;
                                     }
                                     if compressed.is_empty() {
@@ -186,7 +190,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                 value: 1,
                             }),
                         );
-                        eprintln!("Failed to get key from redis: {:?}", e);
+                        eprintln!("Failed to get key from redis: {e:?}");
                         None
                     }
                 }
@@ -199,7 +203,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                             value: 1,
                         }),
                 );
-                eprintln!("Failed to get connection to redis: {:?}", e);
+                eprintln!("Failed to get connection to redis: {e:?}");
                 None
             }
         }
@@ -222,7 +226,7 @@ impl RedisCache {
             false => "redis",
         };
         let password = match config.redis_enterprise_password {
-            Some(password) => format!("{}@", password),
+            Some(password) => format!("{password}@"),
             None => "".to_string(),
         };
         let redis_url = format!(
@@ -243,8 +247,7 @@ impl RedisCache {
             .await
             .map_err(|e| {
                 eprintln!(
-                    "Failed to create redis connection pool on startup. Will continue to run without DataStore. Error: {:?}",
-                    e
+                    "Failed to create redis connection pool on startup. Will continue to run without DataStore. Error: {e:?}"
                 );
             })
             .ok();
@@ -344,15 +347,16 @@ impl RedisCache {
                             }
                         }
                         Err(e) => {
-                            println!("error checking if leader: {:?}", e);
+                            println!("error checking if leader: {e:?}");
                             false
                         }
                     };
 
                     if !request_context.use_lcut || should_update {
+                        // TODO update here
                         // We only store uncompressed data to redis for right now
-                        let data_to_write = match *data.encoding == CompressionEncoder::Gzip {
-                            true => {
+                        let data_to_write = match *data.encoding {
+                            CompressionEncoder::Gzip => {
                                 let mut decoder = GzDecoder::new(Cursor::new(&**data.data));
                                 let mut decompressed = Vec::new();
                                 match decoder.read_to_end(&mut decompressed) {
@@ -369,12 +373,35 @@ impl RedisCache {
                                                 value: 1,
                                             }),
                                         );
-                                        eprintln!("Failed to decode gzipped data before writing to redis: {:?}", e);
+                                        eprintln!("Failed to decode gzipped data before writing to redis: {e:?}");
                                         return;
                                     }
                                 }
                             }
-                            false => data.data.to_vec(),
+                            CompressionEncoder::PlainText => data.data.to_vec(),
+                            CompressionEncoder::Brotli => {
+                                let cursor = Cursor::new(&**data.data);
+                                let mut decompressed = Vec::new();
+                                let mut reader = brotli::Decompressor::new(cursor, 4096);
+                                match reader.read_to_end(&mut decompressed) {
+                                    Ok(_) => decompressed,
+                                    Err(e) => {
+                                        ProxyEventObserver::publish_event(
+                                            ProxyEvent::new_with_rc(
+                                                ProxyEventType::RedisCacheWriteFailed,
+                                                request_context,
+                                            )
+                                            .with_lcut(lcut)
+                                            .with_stat(EventStat {
+                                                operation_type: OperationType::IncrByValue,
+                                                value: 1,
+                                            }),
+                                        );
+                                        eprintln!("Failed to decode br data before writing to redis: {e:?}");
+                                        return;
+                                    }
+                                }
+                            }
                         };
 
                         // We currently only support writing data to redis as plain_text
@@ -412,7 +439,7 @@ impl RedisCache {
                                         value: 1,
                                     }),
                                 );
-                                eprintln!("Failed to set key in redis: {:?}", e);
+                                eprintln!("Failed to set key in redis: {e:?}");
                             }
                         }
                     } else {
@@ -441,10 +468,7 @@ impl RedisCache {
                             value: 1,
                         }),
                     );
-                    eprintln!(
-                        "Failed to get connection to redis, failed to update key: {:?}",
-                        e
-                    );
+                    eprintln!("Failed to get connection to redis, failed to update key: {e:?}");
                 }
             }
         } else if result == &DataProviderRequestResult::Unauthorized {
@@ -477,7 +501,7 @@ impl RedisCache {
                                 value: 1,
                             }),
                         );
-                        eprintln!("Failed to delete key in redis: {:?}", e);
+                        eprintln!("Failed to delete key in redis: {e:?}");
                     }
                 },
                 Err(e) => {
@@ -491,10 +515,7 @@ impl RedisCache {
                             value: 1,
                         }),
                     );
-                    eprintln!(
-                        "Failed to get connection to redis, failed to delete key: {:?}",
-                        e
-                    );
+                    eprintln!("Failed to get connection to redis, failed to delete key: {e:?}");
                 }
             }
         }
