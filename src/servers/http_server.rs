@@ -64,6 +64,61 @@ use crate::servers::authorized_request_context::{
 
 use super::normalized_path::NormalizedPath;
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SdkEncodingInfo {
+    encoding: String,
+    paths: Vec<String>,
+    dict_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SdkSummary {
+    sdk_key: String,
+    encodings: Vec<SdkEncodingInfo>,
+}
+
+#[get("/sdk_summary")]
+async fn sdk_summary(
+    sdk_store: &State<Arc<SdkKeyStore>>,
+    shared_store: &State<Arc<SharedDictConfigSpecStore>>,
+) -> Json<Vec<SdkSummary>> {
+    use std::collections::HashMap;
+    let mut data: HashMap<String, HashMap<String, SdkEncodingInfo>> = HashMap::new();
+
+    for item in sdk_store.get_registered_store() {
+        let key = &item.request_context.sdk_key;
+        let enc = format!("{:?}", item.request_context.encodings);
+        let entry = data
+            .entry(key.clone())
+            .or_default()
+            .entry(enc.clone())
+            .or_insert_with(|| SdkEncodingInfo {
+                encoding: enc.clone(),
+                paths: Vec::new(),
+                dict_ids: Vec::new(),
+            });
+        let p = item.request_context.path.as_str().to_string();
+        if !entry.paths.contains(&p) {
+            entry.paths.push(p);
+        }
+        if item.request_context.path == NormalizedPath::V2DownloadConfigSpecsWithSharedDict {
+            let ids = shared_store.get_dict_ids_for_rc(&item.request_context);
+            entry.dict_ids.extend(ids);
+        }
+    }
+
+    let summary: Vec<SdkSummary> = data
+        .into_iter()
+        .map(|(k, m)| SdkSummary {
+            sdk_key: k,
+            encodings: m.into_values().collect(),
+        })
+        .collect();
+    Json(summary)
+}
+
 pub struct TimerStart(pub Option<Instant>);
 
 #[derive(Serialize, Deserialize)]
@@ -480,6 +535,7 @@ impl HttpServer {
                     post_download_config_specs,
                 ],
             )
+            .mount("/debug", routes![sdk_summary])
             .manage(config_spec_store)
             .manage(shared_dict_config_spec_store)
             .manage(log_event_store)
