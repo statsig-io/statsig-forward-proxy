@@ -1,0 +1,85 @@
+daemon off;
+
+worker_processes auto;
+worker_cpu_affinity auto;
+
+events {
+    worker_connections 1024;
+    multi_accept on;
+    use epoll;
+}
+
+http {
+    error_log /var/log/nginx/error.log error;
+    proxy_cache_path {{PROXY_CACHE_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m manager_files={{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}} manager_threshold={{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}} manager_sleep={{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}} inactive=30s use_temp_path=off;
+
+    server {
+        listen 8000;
+        server_name localhost;
+
+        location /v1/log_event {
+            proxy_pass http://127.0.0.1:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache off;
+        }
+
+        location / {
+            proxy_pass http://127.0.0.1:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache download_cache;
+            proxy_cache_methods GET POST;
+            proxy_cache_key "$request_method$request_uri$http_statsig_api_key$http_accept_encoding$request_body";
+            proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+            proxy_cache_background_update on;
+            proxy_cache_valid 200 5s;
+            proxy_cache_lock on;
+        }
+    }
+
+    server {
+        listen 8443 ssl;
+        server_name localhost;
+
+        ssl_certificate {{SSL_CERT_PATH}};
+        ssl_certificate_key {{SSL_KEY_PATH}};
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers off;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        ssl_client_certificate {{CLIENT_CA_PATH}};
+        ssl_verify_client {{SSL_VERIFY_CLIENT}};
+        ssl_verify_depth 3;
+
+        location /v1/log_event {
+            proxy_pass http://127.0.0.1:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache off;
+        }
+
+        location / {
+            proxy_pass http://127.0.0.1:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache download_cache;
+            proxy_cache_methods GET POST;
+            proxy_cache_key "$request_method$request_uri$http_statsig_api_key$http_accept_encoding$request_body";
+            proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+            proxy_cache_background_update on;
+            proxy_cache_valid 200 5s;
+            proxy_cache_lock on;
+        }
+    }
+}

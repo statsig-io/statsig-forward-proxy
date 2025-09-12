@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use dogstatsd::{BatchingOptions, Client, OptionsBuilder};
 use lazy_static::lazy_static;
 use memchr::memchr;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use tokio::runtime::Handle;
 
@@ -18,6 +18,10 @@ use tokio::time::Instant;
 
 use crate::observers::OperationType;
 use fxhash::FxHashMap;
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
+use opentelemetry::{global, KeyValue};
+use opentelemetry_otlp::{Protocol, WithExportConfig};
+
 use smallvec::SmallVec;
 
 #[derive(Deserialize, Clone)]
@@ -32,6 +36,8 @@ pub struct EnvConfig {
     pub statsd_port_override: Option<String>,
     pub statsd_socket: Option<String>,
     pub datadog_sender_buffer_size: Option<u64>,
+
+    pub otel_exporter_endpoint: Option<String>,
 }
 
 lazy_static! {
@@ -76,6 +82,7 @@ impl StatsLogger {
         enable_statsd_logging: bool,
         enable_datadog_logging: bool,
         enable_statsig_logging: bool,
+        enable_otlp_logging: bool,
     ) -> Self {
         let (tx, rx): (Sender<Operation>, Receiver<Operation>) = mpsc::channel(
             usize::try_from(CONFIG.datadog_sender_buffer_size.unwrap_or(50000)).unwrap(),
@@ -86,6 +93,7 @@ impl StatsLogger {
                     rx,
                     enable_statsd_logging || enable_datadog_logging,
                     enable_statsig_logging,
+                    enable_otlp_logging,
                 )
                 .await;
             });
@@ -134,6 +142,12 @@ impl StatsLogger {
                 }
                 if let Some(code) = event.status_code {
                     tags.push(status_code_tag(code));
+                }
+                if let Some(encodings) = event.get_accept_encodings() {
+                    tags.push(format_tag("accept-encoding", &encodings));
+                }
+                if let Some(enc) = &event.response_encoding {
+                    tags.push(format_tag("content-encoding", enc.as_str()));
                 }
                 (Arc::new(tags), Instant::now())
             })
@@ -200,6 +214,14 @@ fn status_code_tag(code: u16) -> String {
     s
 }
 
+fn format_tag(tag: &str, value: &str) -> String {
+    let mut s = String::with_capacity(16);
+    s.push_str(tag);
+    s.push(':');
+    s.push_str(value);
+    s
+}
+
 fn operation_suffix(operation_type: &OperationType) -> &'static str {
     match operation_type {
         OperationType::Distribution | OperationType::Timing => "latency",
@@ -242,12 +264,151 @@ mod batching {
 
     use super::*;
 
+    fn send(
+        event: Operation,
+        write_to_statsd: bool,
+        write_to_statsig: bool,
+        write_to_otlp: bool,
+    ) -> bool {
+        if write_to_statsig {
+            send_to_statsig(&event);
+        }
+
+        if write_to_statsd {
+            send_to_statsd(&event);
+        }
+        if write_to_otlp {
+            send_to_otlp(&event);
+        }
+        true
+    }
+
+    fn send_to_statsig(event: &Operation) {
+        let metadata = event
+            .tags
+            .iter()
+            .filter_map(|s| parse_key_value(s))
+            .collect();
+
+        Statsig::log_event(
+            &utils::statsig_sdk_wrapper::STATSIG_USER_FACTORY.get(),
+            StatsigEvent {
+                event_name: event.counter_name.clone(),
+                value: Some(event.value.into()),
+                metadata: Some(metadata),
+            },
+        );
+    }
+
+    fn send_to_otlp(event: &Operation) -> bool {
+        match get_otlp() {
+            Some(otlp) => {
+                match event.operation_type {
+                    OperationType::Distribution => otlp.send_histogram_event(event),
+                    OperationType::Timing => otlp.send_histogram_event(event),
+                    OperationType::Gauge => otlp.send_gauge_event(event),
+                    OperationType::IncrByValue => otlp.send_count_event(event),
+                };
+                true // TODO(xin): Not sure what's the implication here
+            }
+            None => false,
+        }
+    }
+
+    pub fn parse_key_value(s: &str) -> Option<(String, serde_json::Value)> {
+        if let Some(idx) = memchr(b':', s.as_bytes()) {
+            let (key, value) = s.split_at(idx);
+            Some((
+                key.to_string(),
+                serde_json::Value::String(value[1..].to_string()),
+            ))
+        } else {
+            None
+        }
+    }
+
+    async fn flush(
+        batch: Vec<Operation>,
+        incr_op_map: FxHashMap<(String, Arc<SmallVec<[String; 4]>>), i64>,
+        write_to_statsd: bool,
+        write_to_statsig: bool,
+        write_to_otlp: bool,
+    ) {
+        for ((counter_name, tags), incr_amount) in incr_op_map {
+            send(
+                Operation {
+                    operation_type: OperationType::IncrByValue,
+                    counter_name,
+                    value: incr_amount,
+                    tags,
+                },
+                write_to_statsd,
+                write_to_statsig,
+                write_to_otlp,
+            );
+        }
+
+        for event in batch {
+            send(event, write_to_statsd, write_to_statsig, write_to_otlp);
+        }
+    }
+
+    pub(crate) async fn process_operations(
+        mut rx: Receiver<Operation>,
+        write_to_statsd: bool,
+        write_to_statsig: bool,
+        write_to_otlp: bool,
+    ) {
+        let mut batch = Vec::with_capacity(CONFIG.datadog_max_batch_event_count.unwrap_or(3000));
+        let mut incr_op_map: FxHashMap<(String, Arc<SmallVec<[String; 4]>>), i64> =
+            FxHashMap::default();
+        let mut last_updated = Instant::now();
+        let max_batch_time =
+            Duration::from_millis(CONFIG.datadog_max_batch_time_ms.unwrap_or(10000));
+        let max_batch_size = CONFIG.datadog_max_batch_event_count.unwrap_or(3000);
+        let graceful_shutdown_token = GRACEFUL_SHUTDOWN_TOKEN.clone();
+
+        loop {
+            tokio::select! {
+                Some(operation) = rx.recv() => {
+                    match operation.operation_type {
+                        OperationType::IncrByValue => {
+                            *incr_op_map
+                                .entry((operation.counter_name.clone(), operation.tags.clone()))
+                                .or_insert(0) += operation.value;
+                        }
+                        _ => batch.push(operation),
+                    }
+
+                    if batch.len() + incr_op_map.len() >= max_batch_size
+                        || last_updated.elapsed() >= max_batch_time
+                    {
+                        let final_batch = std::mem::take(&mut batch);
+                        let final_incr_op_map = std::mem::take(&mut incr_op_map);
+                        tokio::spawn(flush(
+                            final_batch,
+                            final_incr_op_map,
+                            write_to_statsd,
+                            write_to_statsig,
+                            write_to_otlp
+                        ));
+                        last_updated = Instant::now();
+                    }
+                },
+                _ = graceful_shutdown_token.cancelled() => break,
+            }
+        }
+    }
+
+    // ------------------------------
+    // StatsD integrations
+    // ------------------------------
     #[once(option = true)]
-    fn get_or_initialize_client() -> Option<Arc<Client>> {
+    fn get_or_initialize_statsd_client() -> Option<Arc<Client>> {
         match Client::new(initialize_datadog_client_options()) {
             Ok(client) => Some(Arc::new(client)),
             Err(e) => {
-                eprintln!("Failed to initialize statsd client: {}", e);
+                eprintln!("Failed to initialize statsd client: {e}");
                 None
             }
         }
@@ -289,9 +450,9 @@ mod batching {
         // Default Tags
         let tags = envy::from_env::<DefaultTagsConfig>().expect("Malformed config");
         [
-            tags.dd_version.map(|v| format!("version:{}", v)),
-            tags.dd_env.map(|v| format!("env:{}", v)),
-            tags.dd_service.map(|v| format!("service:{}", v)),
+            tags.dd_version.map(|v| format!("version:{v}")),
+            tags.dd_env.map(|v| format!("env:{v}")),
+            tags.dd_service.map(|v| format!("service:{v}")),
             Some(format!("pod_name:{}", get_hostname())),
         ]
         .iter()
@@ -304,35 +465,6 @@ mod batching {
         builder.build()
     }
 
-    fn send(event: Operation, write_to_statsd: bool, write_to_statsig: bool) -> bool {
-        if write_to_statsig {
-            send_to_statsig(&event);
-        }
-
-        if !write_to_statsd {
-            return true;
-        }
-
-        send_to_statsd(&event)
-    }
-
-    fn send_to_statsig(event: &Operation) {
-        let metadata = event
-            .tags
-            .iter()
-            .filter_map(|s| parse_key_value(s))
-            .collect();
-
-        Statsig::log_event(
-            &utils::statsig_sdk_wrapper::STATSIG_USER_FACTORY.get(),
-            StatsigEvent {
-                event_name: event.counter_name.clone(),
-                value: Some(event.value.into()),
-                metadata: Some(metadata),
-            },
-        );
-    }
-
     fn send_to_statsd(event: &Operation) -> bool {
         match event.operation_type {
             OperationType::Timing => send_timing(event),
@@ -343,11 +475,11 @@ mod batching {
     }
 
     fn send_timing(event: &Operation) -> bool {
-        if let Some(statsd_client) = get_or_initialize_client() {
+        if let Some(statsd_client) = get_or_initialize_statsd_client() {
             match statsd_client.timing(&event.counter_name, event.value, event.tags.as_ref()) {
                 Ok(()) => return true,
                 Err(err) => {
-                    eprintln!("Failed to update timing for counter: {}", err);
+                    eprintln!("Failed to update timing for counter: {err}");
                 }
             }
         }
@@ -355,7 +487,7 @@ mod batching {
     }
 
     fn send_distribution(event: &Operation) -> bool {
-        if let Some(statsd_client) = get_or_initialize_client() {
+        if let Some(statsd_client) = get_or_initialize_statsd_client() {
             match statsd_client.distribution(
                 &event.counter_name,
                 event.value.to_string(),
@@ -363,7 +495,7 @@ mod batching {
             ) {
                 Ok(()) => return true,
                 Err(err) => {
-                    eprintln!("Failed to update latency for counter: {}", err);
+                    eprintln!("Failed to update latency for counter: {err}");
                 }
             }
         }
@@ -371,7 +503,7 @@ mod batching {
     }
 
     fn send_gauge(event: &Operation) -> bool {
-        if let Some(statsd_client) = get_or_initialize_client() {
+        if let Some(statsd_client) = get_or_initialize_statsd_client() {
             match statsd_client.gauge(
                 &event.counter_name,
                 event.value.to_string(),
@@ -379,7 +511,7 @@ mod batching {
             ) {
                 Ok(()) => return true,
                 Err(err) => {
-                    eprintln!("Failed to update gauge for counter: {}", err);
+                    eprintln!("Failed to update gauge for counter: {err}");
                 }
             }
         }
@@ -387,96 +519,121 @@ mod batching {
     }
 
     fn send_incr_by_value(event: &Operation) -> bool {
-        if let Some(statsd_client) = get_or_initialize_client() {
+        if let Some(statsd_client) = get_or_initialize_statsd_client() {
             match statsd_client.incr_by_value(&event.counter_name, event.value, event.tags.as_ref())
             {
                 Ok(()) => return true,
                 Err(err) => {
-                    eprintln!("Failed to update increment for counter: {}", err);
+                    eprintln!("Failed to update increment for counter: {err}");
                 }
             }
         }
         false
     }
 
-    fn parse_key_value(s: &str) -> Option<(String, serde_json::Value)> {
-        if let Some(idx) = memchr(b':', s.as_bytes()) {
-            let (key, value) = s.split_at(idx);
-            Some((
-                key.to_string(),
-                serde_json::Value::String(value[1..].to_string()),
-            ))
-        } else {
-            None
+    /*
+    OTLP Integration
+     */
+    #[once(option = true)]
+    fn get_otlp() -> Option<Arc<OTLPLogger>> {
+        OTLPLogger::new().map(Arc::new)
+    }
+}
+
+struct OTLPLogger {
+    pub meter: Arc<Meter>,
+    pub counter_map: RwLock<FxHashMap<String, Counter<f64>>>,
+    pub gauge_map: RwLock<FxHashMap<String, Gauge<f64>>>,
+    pub histogram_map: RwLock<FxHashMap<String, Histogram<f64>>>,
+}
+
+impl OTLPLogger {
+    pub fn new() -> Option<Self> {
+        let mut exporter_builder = opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpJson);
+        if let Some(e) = &CONFIG.otel_exporter_endpoint {
+            exporter_builder = exporter_builder.with_endpoint(e);
         }
+        exporter_builder
+            .build()
+            .ok()
+            .map(|e| {
+                let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+                    .with_periodic_exporter(e)
+                    .build();
+                global::set_meter_provider(meter_provider.clone());
+                Arc::new(global::meter("statsig.forward_proxy"))
+            })
+            .map(|meter| Self {
+                meter,
+                counter_map: RwLock::new(FxHashMap::default()),
+                gauge_map: RwLock::new(FxHashMap::default()),
+                histogram_map: RwLock::new(FxHashMap::default()),
+            })
     }
 
-    async fn flush(
-        batch: Vec<Operation>,
-        incr_op_map: FxHashMap<(String, Arc<SmallVec<[String; 4]>>), i64>,
-        write_to_statsd: bool,
-        write_to_statsig: bool,
-    ) {
-        for ((counter_name, tags), incr_amount) in incr_op_map {
-            send(
-                Operation {
-                    operation_type: OperationType::IncrByValue,
-                    counter_name,
-                    value: incr_amount,
-                    tags,
-                },
-                write_to_statsd,
-                write_to_statsig,
-            );
-        }
-
-        for event in batch {
-            send(event, write_to_statsd, write_to_statsig);
-        }
-    }
-
-    pub(crate) async fn process_operations(
-        mut rx: Receiver<Operation>,
-        write_to_statsd: bool,
-        write_to_statsig: bool,
-    ) {
-        let mut batch = Vec::with_capacity(CONFIG.datadog_max_batch_event_count.unwrap_or(3000));
-        let mut incr_op_map: FxHashMap<(String, Arc<SmallVec<[String; 4]>>), i64> =
-            FxHashMap::default();
-        let mut last_updated = Instant::now();
-        let max_batch_time =
-            Duration::from_millis(CONFIG.datadog_max_batch_time_ms.unwrap_or(10000));
-        let max_batch_size = CONFIG.datadog_max_batch_event_count.unwrap_or(3000);
-        let graceful_shutdown_token = GRACEFUL_SHUTDOWN_TOKEN.clone();
-
-        loop {
-            tokio::select! {
-                Some(operation) = rx.recv() => {
-                    match operation.operation_type {
-                        OperationType::IncrByValue => {
-                            *incr_op_map
-                                .entry((operation.counter_name.clone(), operation.tags.clone()))
-                                .or_insert(0) += operation.value;
-                        }
-                        _ => batch.push(operation),
-                    }
-
-                    if batch.len() + incr_op_map.len() >= max_batch_size
-                        || last_updated.elapsed() >= max_batch_time
-                    {
-                        let final_batch = std::mem::take(&mut batch);
-                        let final_incr_op_map = std::mem::take(&mut incr_op_map);
-                        tokio::spawn(flush(
-                            final_batch,
-                            final_incr_op_map,
-                            write_to_statsd,
-                            write_to_statsig,
-                        ));
-                        last_updated = Instant::now();
-                    }
-                },
-                _ = graceful_shutdown_token.cancelled() => break,
+    fn send_histogram_event(&self, event: &Operation) {
+        let mut histogram_map = self.histogram_map.write();
+        let tags = Self::convert_tags(event.tags.clone());
+        match histogram_map.get(&event.counter_name) {
+            Some(h) => {
+                h.record(event.value as f64, &tags);
             }
-        }
+            None => {
+                let h = self
+                    .meter
+                    .f64_histogram(event.counter_name.to_string())
+                    .build();
+                h.record(event.value as f64, &tags); // TODO conversion
+                histogram_map.insert(event.counter_name.to_string(), h);
+            }
+        };
+    }
+
+    fn send_count_event(&self, event: &Operation) {
+        let mut counter_map = self.counter_map.write();
+        let tags = Self::convert_tags(event.tags.clone());
+        match counter_map.get(&event.counter_name) {
+            Some(c) => {
+                c.add(event.value as f64, &tags); // TODO conversion
+            }
+            None => {
+                let c = self
+                    .meter
+                    .f64_counter(event.counter_name.to_string())
+                    .build();
+                c.add(event.value as f64, &tags); // TODO conversion
+                counter_map.insert(event.counter_name.to_string(), c);
+            }
+        };
+    }
+
+    fn send_gauge_event(&self, event: &Operation) {
+        let mut gauge_map = self.gauge_map.write();
+        let tags = Self::convert_tags(event.tags.clone());
+        match gauge_map.get(&event.counter_name) {
+            Some(g) => {
+                g.record(event.value as f64, &tags); // TODO conversion
+            }
+            None => {
+                let g = self.meter.f64_gauge(event.counter_name.to_string()).build();
+                g.record(event.value as f64, &tags); // TODO conversion
+                gauge_map.insert(event.counter_name.to_string(), g);
+            }
+        };
+    }
+
+    fn convert_tags(tags: Arc<SmallVec<[String; 4]>>) -> Vec<KeyValue> {
+        tags.iter()
+            .filter_map(|t| {
+                if let Some(idx) = memchr(b':', t.as_bytes()) {
+                    let (key, value) = t.split_at(idx);
+                    Some(KeyValue::new(key.to_string(), value.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::datastore::id_list_store::GetIdListStore;
 use crate::datastore::log_event_store::LogEventStore;
+use crate::datastore::sdk_key_store::SdkKeyStore;
 
 use crate::datastore::shared_dict_config_spec_store::get_dictionary_compressed_config_spec_and_shadow;
 use crate::datastore::shared_dict_config_spec_store::SharedDictConfigSpecStore;
@@ -15,6 +16,7 @@ use crate::observers::EventStat;
 use crate::observers::OperationType;
 use crate::observers::{ProxyEvent, ProxyEventType};
 use crate::servers::http_apis;
+use crate::utils::compress_encoder::convert_compression_encodings_from_header_map;
 use crate::utils::compress_encoder::CompressionEncoder;
 use crate::Cli;
 use bytes::Bytes;
@@ -94,6 +96,7 @@ where
 
 enum RequestPayloads {
     Gzipped(Arc<Bytes>, u64, Option<Arc<str>>),
+    Brotli(Arc<Bytes>, u64, Option<Arc<str>>),
     Plain(Arc<Bytes>, u64, Option<Arc<str>>),
     Unauthorized(),
 }
@@ -105,6 +108,17 @@ impl<'r> Responder<'r, 'static> for RequestPayloads {
                 .status(Status::Ok)
                 .header(ContentType::JSON)
                 .header(rocket::http::Header::new("Content-Encoding", "gzip"))
+                .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
+                .header(rocket::http::Header::new(
+                    "x-compression-dict",
+                    zstd_dict_id.clone().unwrap_or("".into()).to_string(),
+                ))
+                .sized_body(data.len(), Cursor::new(DerefRef(data)))
+                .ok(),
+            RequestPayloads::Brotli(data, lcut, zstd_dict_id) => Response::build()
+                .status(Status::Ok)
+                .header(ContentType::JSON)
+                .header(rocket::http::Header::new("Content-Encoding", "br"))
                 .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
                 .header(rocket::http::Header::new(
                     "x-compression-dict",
@@ -148,6 +162,8 @@ async fn get_download_config_specs(
         Some(data) => {
             if *data.config.encoding == CompressionEncoder::Gzip {
                 RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut, None)
+            } else if *data.config.encoding == CompressionEncoder::Brotli {
+                RequestPayloads::Brotli(Arc::clone(&data.config.data), data.lcut, None)
             } else {
                 RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut, None)
             }
@@ -277,6 +293,7 @@ impl HttpServer {
         log_event_store: Arc<LogEventStore>,
         id_list_store: Arc<GetIdListStore>,
         rc_cache: Arc<AuthorizedRequestContextCache>,
+        sdk_key_store: Arc<SdkKeyStore>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let sdk_key_cache = SdkKeyCache(RwLock::new(HashMap::new()));
 
@@ -306,6 +323,7 @@ impl HttpServer {
             .manage(log_event_store)
             .manage(id_list_store)
             .manage(rc_cache)
+            .manage(sdk_key_store)
             .manage(sdk_key_cache)
             .manage(cli.clone())
             .attach(AdHoc::on_request("Normalize SDK Key", |req, _| {
@@ -360,15 +378,9 @@ impl HttpServer {
                         .get_one("statsig-api-key")
                         .unwrap_or("no-key-provided")
                         .to_string();
-                    let encoding = if req
-                        .headers()
-                        .get("Accept-Encoding")
-                        .any(|v| v.to_lowercase().contains("gzip"))
-                    {
-                        CompressionEncoder::Gzip
-                    } else {
-                        CompressionEncoder::PlainText
-                    };
+                    let encodings = convert_compression_encodings_from_header_map(
+                        req.headers().get("Accept-Encoding"),
+                    );
                     let lcut = resp
                         .headers()
                         .get_one("x-since-time")
@@ -381,10 +393,10 @@ impl HttpServer {
                     let path = NormalizedPath::from(req.uri().path().as_str());
                     let status_code = resp.status().code;
                     let status_class = resp.status().class();
-
+                    let content_encoding = resp.headers().get("Content-Encoding").collect();
                     // Spawn a new task to handle logging
                     tokio::spawn(async move {
-                        let request_context = cache.get_or_insert(sdk_key, path, encoding);
+                        let request_context = cache.get_or_insert(sdk_key, path, encodings);
 
                         let event = ProxyEvent::new_with_rc(
                             if status_class == StatusClass::Success {
@@ -396,6 +408,7 @@ impl HttpServer {
                         )
                         .with_status_code(status_code)
                         .with_lcut(lcut)
+                        .with_response_encoding(content_encoding)
                         .with_zstd_dict_id(zstd_dict_id.map(Arc::from))
                         .with_stat(EventStat {
                             operation_type: OperationType::Distribution,

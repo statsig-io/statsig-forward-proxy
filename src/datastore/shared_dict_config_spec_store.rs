@@ -210,7 +210,7 @@ pub async fn get_dictionary_compressed_config_spec_and_shadow(
         let shadow_request_context = authorized_request_context_cache.get_or_insert(
             shared_dict_request_context_clone.sdk_key.clone(),
             NormalizedPath::V2DownloadConfigSpecs,
-            CompressionEncoder::Gzip, // decompression is handled before committing to DataStore
+            vec![CompressionEncoder::Gzip], // decompression is handled before committing to DataStore
         );
         let _ = config_spec_store
             .get_config_spec(&shadow_request_context, since_time)

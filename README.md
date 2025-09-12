@@ -75,8 +75,8 @@ Options:
 
       --x509-client-cert-path <X509_CLIENT_CERT_PATH>
 
-      --enforce-tls <ENFORCE_TLS>
-          [default: true] [possible values: true, false]
+      --enforce-tls
+          [default: false]
       --enforce-mtls
 
   -h, --help

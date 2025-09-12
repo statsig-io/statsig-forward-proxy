@@ -65,11 +65,12 @@ WORKDIR /app
 # Set environment variable
 ENV ROCKET_ENV=prod
 
-# Expose port 8001 for Nginx and 8000 for the proxy
-EXPOSE 8000 8001
+EXPOSE 8000 8443
 
-# Copy Nginx configuration
-COPY nginx.conf.template /nginx.conf.template
+COPY nginx-http-only.conf.template /nginx-http-only.conf.template
+COPY nginx-http-https.conf.template /nginx-http-https.conf.template
+COPY nginx-https-only.conf.template /nginx-https-only.conf.template
+
 # Create an entrypoint script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

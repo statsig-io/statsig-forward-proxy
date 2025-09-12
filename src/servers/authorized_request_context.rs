@@ -5,12 +5,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::servers::normalized_path::NormalizedPath;
-use crate::utils::compress_encoder::CompressionEncoder;
+use crate::utils::compress_encoder::{
+    convert_compression_encodings_from_header_map, CompressionEncoder,
+};
 
 #[derive(Debug)]
 pub struct AuthError;
 
-type CacheKey = (String, NormalizedPath, CompressionEncoder);
+type CacheKey = (String, NormalizedPath, Vec<CompressionEncoder>);
 pub struct AuthorizedRequestContextCache(
     Arc<RwLock<HashMap<CacheKey, Arc<AuthorizedRequestContext>>>>,
 );
@@ -30,9 +32,9 @@ impl AuthorizedRequestContextCache {
         &self,
         sdk_key: String,
         path: NormalizedPath,
-        encoding: CompressionEncoder,
+        encodings: Vec<CompressionEncoder>,
     ) -> Arc<AuthorizedRequestContext> {
-        let key = (sdk_key.clone(), path.clone(), encoding);
+        let key = (sdk_key.clone(), path.clone(), encodings.clone());
         {
             let read_lock = self.0.read();
             if let Some(context) = read_lock.get(&key) {
@@ -43,7 +45,7 @@ impl AuthorizedRequestContextCache {
         let mut write_lock = self.0.write();
         write_lock
             .entry(key)
-            .or_insert_with(|| Arc::new(AuthorizedRequestContext::new(sdk_key, path, encoding)))
+            .or_insert_with(|| Arc::new(AuthorizedRequestContext::new(sdk_key, path, encodings)))
             .clone()
     }
 }
@@ -67,24 +69,17 @@ impl<'r> FromRequest<'r> for AuthorizedRequestContextWrapper {
             Outcome::Forward(status) => return Outcome::Forward(status),
         };
 
-        let headers = request.headers();
         let cache = request
             .rocket()
             .state::<Arc<AuthorizedRequestContextCache>>()
             .unwrap();
-
-        let encoding = if headers
-            .get("Accept-Encoding")
-            .any(|v| v.to_lowercase().contains("gzip"))
-        {
-            CompressionEncoder::Gzip
-        } else {
-            CompressionEncoder::PlainText
-        };
+        let headers = request.headers();
+        let encodings =
+            convert_compression_encodings_from_header_map(headers.get("Accept-Encoding"));
 
         match headers.get_one("statsig-api-key") {
             Some(sdk_key) => Outcome::Success(AuthorizedRequestContextWrapper(
-                cache.get_or_insert(sdk_key.to_string(), normalized_path, encoding),
+                cache.get_or_insert(sdk_key.to_string(), normalized_path, encodings),
             )),
             None => Outcome::Error((Status::BadRequest, AuthError)),
         }
@@ -97,11 +92,11 @@ pub struct AuthorizedRequestContext {
     pub path: NormalizedPath,
     pub use_lcut: bool,
     pub use_dict_id: bool,
-    pub encoding: CompressionEncoder,
+    pub encodings: Vec<CompressionEncoder>,
 }
 
 impl AuthorizedRequestContext {
-    pub fn new(sdk_key: String, path: NormalizedPath, encoding: CompressionEncoder) -> Self {
+    pub fn new(sdk_key: String, path: NormalizedPath, encodings: Vec<CompressionEncoder>) -> Self {
         let use_lcut = path == NormalizedPath::V1DownloadConfigSpecs
             || path == NormalizedPath::V2DownloadConfigSpecs
             || path == NormalizedPath::V2DownloadConfigSpecsWithSharedDict;
@@ -113,7 +108,7 @@ impl AuthorizedRequestContext {
             path,
             use_lcut,
             use_dict_id,
-            encoding,
+            encodings,
         }
     }
 }
@@ -122,17 +117,19 @@ impl std::fmt::Display for AuthorizedRequestContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}|{}|{}",
+            "{}|{}|{:?}",
             self.sdk_key,
             self.path.as_str(),
-            self.encoding
+            self.encodings
         )
     }
 }
 
 impl PartialEq for AuthorizedRequestContext {
     fn eq(&self, other: &Self) -> bool {
-        self.sdk_key == other.sdk_key && self.path == other.path && self.encoding == other.encoding
+        self.sdk_key == other.sdk_key
+            && self.path == other.path
+            && self.encodings == other.encodings
     }
 }
 
@@ -142,6 +139,6 @@ impl std::hash::Hash for AuthorizedRequestContext {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.sdk_key.hash(state);
         self.path.hash(state);
-        self.encoding.hash(state);
+        self.encodings.hash(state);
     }
 }

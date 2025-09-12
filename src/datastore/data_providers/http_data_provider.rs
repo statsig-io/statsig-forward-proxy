@@ -61,8 +61,8 @@ impl DataProviderTrait for HttpDataProvider {
         let status = response.status();
         let headers = response.headers().clone();
 
-        let (body, bytes) = match response.bytes().await {
-            Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), bytes),
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
             Err(err) => {
                 return self
                     .handle_error(
@@ -76,13 +76,14 @@ impl DataProviderTrait for HttpDataProvider {
         };
 
         if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes).into_owned();
             return self
                 .handle_error(body, start_time, request_context, lcut)
                 .await;
         }
 
         if !request_builder
-            .is_an_update(&body, &headers, &request_context.sdk_key)
+            .is_an_update(bytes.as_ref(), &headers, &request_context.sdk_key)
             .await
         {
             return self.handle_no_data(lcut, start_time, request_context).await;
@@ -97,6 +98,7 @@ impl DataProviderTrait for HttpDataProvider {
                     Ok(encoding) => Some(encoding.to_string()),
                     Err(_e) => None,
                 });
+
         self.handle_success(
             (content_encoding, bytes),
             since_time,
@@ -114,9 +116,9 @@ static REDACTED_STR: Lazy<Arc<str>> = Lazy::new(|| Arc::from("REDACTED"));
 impl HttpDataProvider {
     // See https://github.com/seanmonstar/reqwest/discussions/2342 for why we need this
     fn make_useful_error_message(mut err: &(dyn std::error::Error + 'static)) -> String {
-        let mut s = format!("{}", err);
+        let mut s = format!("{err}");
         while let Some(src) = err.source() {
-            let _ = write!(s, "\\nCaused by: {}", src);
+            let _ = write!(s, "\\nCaused by: {src}");
             err = src;
         }
         s
@@ -252,7 +254,7 @@ impl HttpDataProvider {
     ) -> DataProviderResult {
         let duration = start_time.elapsed();
         let ms = duration.as_millis() as i64;
-        let encoding = match encoding_str {
+        let encoding = match encoding_str.clone() {
             Some(encoding_unwrapped) => CompressionEncoder::from_str(&encoding_unwrapped)
                 .unwrap_or(CompressionEncoder::PlainText),
             None => CompressionEncoder::PlainText,
@@ -261,6 +263,7 @@ impl HttpDataProvider {
         ProxyEventObserver::publish_event(
             ProxyEvent::new_with_rc(ProxyEventType::HttpDataProviderGotData, request_context)
                 .with_lcut(since_time)
+                .with_response_encoding(encoding.to_string())
                 .with_zstd_dict_id(zstd_dict_id.clone())
                 .with_stat(EventStat {
                     operation_type: OperationType::Distribution,
