@@ -45,7 +45,7 @@ impl NginxCacheMonitor {
                         );
                     }
                     Err(e) => {
-                        eprintln!("Failed to calculate directory size: {}", e);
+                        eprintln!("Failed to calculate directory size: {e}");
                     }
                 }
 

@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 println!("CURRENT TIME={}", Local::now());
-                println!("Error={:?}", e);
+                println!("Error={e:?}");
                 break;
             }
         }

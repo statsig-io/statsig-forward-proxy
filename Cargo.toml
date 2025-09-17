@@ -1,6 +1,6 @@
 [package]
 name = "statsig-forward-proxy"
-version = "3.2.2"
+version = "3.2.3"
 edition = "2021"
 rust-version = "1.88.0"
 
@@ -45,6 +45,10 @@ bytes = "1.10.1"
 flate2 = "1.1.2"
 regex = "1.11.1"
 arc-swap = "1.7.1"
+brotli = "8"
+opentelemetry = {version = "0.30.0", features = ["internal-logs"]}
+opentelemetry_sdk = {version = "0.30.0", features = ["internal-logs"]}
+opentelemetry-otlp = { version = "0.30.0", features = ["grpc-tonic", "http-proto", "http-json", "internal-logs"] }
 
 
 [build-dependencies]
