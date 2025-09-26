@@ -46,6 +46,7 @@ pub struct RedisCache {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct RedisEnvConfig {
+    pub redis_enterprise_user: Option<String>,
     pub redis_enterprise_password: Option<String>,
     pub redis_enterprise_host: String,
     pub redis_enterprise_port: String,
@@ -225,12 +226,14 @@ impl RedisCache {
             true => "rediss",
             false => "redis",
         };
+        let user = config.redis_enterprise_user.unwrap_or("".to_string());
         let password = match config.redis_enterprise_password {
             Some(password) => format!("{password}@"),
             None => "".to_string(),
         };
         let redis_url = format!(
-            "{protocol}://{password}{host}:{port}",
+            "{protocol}://{user}{password}{host}:{port}",
+            user = user,
             protocol = protocol,
             password = password,
             host = config.redis_enterprise_host,
