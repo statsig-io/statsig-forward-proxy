@@ -49,8 +49,6 @@ Options:
 
       --statsig-logging
 
-      --otlp-logging
-
       --debug-logging
 
   -m, --maximum-concurrent-sdk-keys <MAXIMUM_CONCURRENT_SDK_KEYS>
@@ -99,7 +97,6 @@ Additional logging parameters we support:
                  It will also emit useful data such as latency for some events.
 --double-write-cache-for-legacy-key: Starting in version 2.x.x, we begin to use a new key schema in preparation for SDKs to manage all key creation in external caches. This allows you to gracefully migrate by double writing to the old key as well.
 --statsig-logging: Send events to Statsig to monitor performance and behaviour of proxy.
---otlp-logging: This will emit the same metrics and events using otel.
 --statsd-logging: This will emit the same metrics and events using statsd.
 --datadog-logging: Same as statsd logging, but uses distribution metrics instead of timing
 --force_gcp_profiling_enabled: Enable gcp cloud profiler by force.

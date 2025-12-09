@@ -50,7 +50,6 @@ impl HttpDataProviderObserverTrait for GetIdListStore {
     async fn get(
         &self,
         _request_context: &Arc<AuthorizedRequestContext>,
-        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         unimplemented!()
     }
@@ -79,7 +78,6 @@ impl GetIdListStore {
                 self.background_data_provider.clone(),
                 request_context,
                 0,
-                &None,
                 false,
             )
             .await;

@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             since_time: Some(1234),
             sdk_key: sdk_key.clone(),
             version: Some(version),
-            zstd_dict_id: Some("test".to_string()),
+            zstd_dict_id: None,
         });
         let response: tonic::Response<statsig_forward_proxy::ConfigSpecResponse> =
             client.get_config_spec(request).await?;
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         since_time: Some(1234),
         sdk_key: sdk_key.clone(),
         version: Some(2),
-        zstd_dict_id: Some("test".to_string()),
+        zstd_dict_id: None,
     });
     let response = client.stream_config_spec(request).await?;
     println!("Metadata={:?}", response.metadata());

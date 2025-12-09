@@ -11,7 +11,6 @@
 The forward proxy comes pre-built with a few different options for monitoring:
 1. **--debug-logging**: With no additional configuration, we will output event information to stdout. This is best used for debugging and assisting while deployment for quick understanding of functionality. This is not recommended for prod.
 1. **--statsig-logging**: With configuration, send your metrics to Statsig and monitor through our dashboards and metric explorer capabilities.
-1. **--otlp-logging**: With configuration, utilize the [open standard](https://opentelemetry.io/docs/concepts/signals/metrics/) to emit metrics with http/json. (If you need other protocl support contact us )
 1. **--statsd-logging**: With configuration, utilize the [open standard](https://github.com/statsd/statsd/blob/master/docs/metric_types.md) to emit metrics to a UDS or UDP socket.
 1. **--datadog-logging**: Same as statsd, except replaces the timing metric with datadog's proprietary distribution metric.
 
@@ -34,13 +33,6 @@ To get Statsig logging working, pass in the flag and set your sdk key using envi
 ```
 STATSIG_SERVER_SDK_KEY="your_key" statsig-forward-proxy http --statsig-logging
 ```
-
-### OTLP Logging
-If you want to override your endpoint:
-```
-OTEL_EXPORTER_ENDPOINT="YOUR ENDPOINT" STATSIG-FORWARD-PROXY HTTP --otlp-logging
-```
-
 
 ### Statsd and Datadog Logging
 

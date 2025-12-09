@@ -30,7 +30,6 @@ impl HttpDataProviderObserverTrait for DisabledCache {
     async fn get(
         &self,
         _request_context: &Arc<AuthorizedRequestContext>,
-        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         return None;
     }

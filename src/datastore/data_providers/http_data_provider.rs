@@ -37,12 +37,11 @@ impl DataProviderTrait for HttpDataProvider {
         request_builder: &Arc<dyn RequestBuilderTrait>,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        zstd_dict_id: &Option<Arc<str>>,
     ) -> DataProviderResult {
         let start_time = Instant::now();
 
         let response = match request_builder
-            .make_request(http_client, request_context, lcut, zstd_dict_id)
+            .make_request(http_client, request_context, lcut)
             .await
         {
             Ok(response) => response,
@@ -83,14 +82,13 @@ impl DataProviderTrait for HttpDataProvider {
         }
 
         if !request_builder
-            .is_an_update(bytes.as_ref(), &headers, &request_context.sdk_key)
+            .is_an_update(bytes.as_ref(), &headers, request_context)
             .await
         {
             return self.handle_no_data(lcut, start_time, request_context).await;
         }
 
         let since_time = self.parse_since_time(&headers, lcut, start_time, request_context);
-        let compressed_with_dict = self.parse_zstd_dict_id(&headers, request_context);
         let content_encoding =
             headers
                 .get("content-encoding")
@@ -102,7 +100,6 @@ impl DataProviderTrait for HttpDataProvider {
         self.handle_success(
             (content_encoding, bytes),
             since_time,
-            &compressed_with_dict,
             start_time,
             request_context,
         )
@@ -159,7 +156,6 @@ impl HttpDataProvider {
             },
             body: None,
             lcut: 0,
-            zstd_dict_id: None,
         }
     }
 
@@ -185,28 +181,7 @@ impl HttpDataProvider {
             result: DataProviderRequestResult::NoDataAvailable,
             body: None,
             lcut: 0,
-            zstd_dict_id: None,
         }
-    }
-
-    fn parse_zstd_dict_id(
-        &self,
-        headers: &HeaderMap,
-        request_context: &Arc<AuthorizedRequestContext>,
-    ) -> Option<Arc<str>> {
-        if !request_context.use_dict_id {
-            return None;
-        }
-
-        let zstd_dict_id: Option<Arc<str>> = headers
-            .get("x-compression-dict")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| match value.is_empty() {
-                true => None,
-                false => Some(Arc::from(value.to_string())),
-            });
-
-        zstd_dict_id
     }
 
     fn parse_since_time(
@@ -248,7 +223,6 @@ impl HttpDataProvider {
         &self,
         (encoding_str, data): (Option<String>, Bytes),
         since_time: u64,
-        zstd_dict_id: &Option<Arc<str>>,
         start_time: Instant,
         request_context: &Arc<AuthorizedRequestContext>,
     ) -> DataProviderResult {
@@ -264,7 +238,6 @@ impl HttpDataProvider {
             ProxyEvent::new_with_rc(ProxyEventType::HttpDataProviderGotData, request_context)
                 .with_lcut(since_time)
                 .with_response_encoding(encoding.to_string())
-                .with_zstd_dict_id(zstd_dict_id.clone())
                 .with_stat(EventStat {
                     operation_type: OperationType::Distribution,
                     value: ms,
@@ -278,7 +251,6 @@ impl HttpDataProvider {
                 data: Arc::from(data),
             })),
             lcut: since_time,
-            zstd_dict_id: zstd_dict_id.clone(),
         }
     }
 }

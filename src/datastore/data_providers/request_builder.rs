@@ -50,13 +50,12 @@ pub trait RequestBuilderTrait: Send + Sync + 'static {
         http_client: &reqwest::Client,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        zstd_dict_id: &Option<Arc<str>>,
     ) -> Result<reqwest::Response, reqwest::Error>;
     async fn is_an_update(
         &self,
         body: &[u8],
         headers: &reqwest::header::HeaderMap,
-        sdk_key: &str,
+        rc: &Arc<AuthorizedRequestContext>,
     ) -> bool;
     fn get_observers(&self) -> Arc<HttpDataProviderObserver>;
     fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send>;
@@ -72,7 +71,6 @@ impl RequestBuilderTrait for NoopRequestBuilder {
         _http_client: &reqwest::Client,
         _request_context: &Arc<AuthorizedRequestContext>,
         _lcut: u64,
-        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Result<reqwest::Response, reqwest::Error> {
         unimplemented!()
     }
@@ -81,7 +79,7 @@ impl RequestBuilderTrait for NoopRequestBuilder {
         &self,
         _body: &[u8],
         _headers: &reqwest::header::HeaderMap,
-        _sdk_key: &str,
+        _rc: &Arc<AuthorizedRequestContext>,
     ) -> bool {
         unimplemented!()
     }
@@ -131,7 +129,6 @@ impl RequestBuilderTrait for DcsRequestBuilder {
         http_client: &reqwest::Client,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let url = match lcut == 0 {
             true => format!(
@@ -164,94 +161,7 @@ impl RequestBuilderTrait for DcsRequestBuilder {
         &self,
         _body: &[u8],
         headers: &reqwest::header::HeaderMap,
-        _sdk_key: &str,
-    ) -> bool {
-        // If this header is not present, we default to "Yes, this is an update"
-        // Otherwise, this header will be "true" if this is NOT an update.
-        headers
-            .get("x-cache-hit")
-            .and_then(|value| value.to_str().ok())
-            .is_none_or(|value| value == "false")
-    }
-
-    fn get_observers(&self) -> Arc<HttpDataProviderObserver> {
-        Arc::clone(&self.http_observers)
-    }
-
-    fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send> {
-        Arc::clone(&self.backup_cache)
-    }
-
-    async fn should_make_request(&self, _rc: &Arc<AuthorizedRequestContext>) -> bool {
-        true
-    }
-}
-
-pub struct SharedDictDcsRequestBuilder {
-    pub base_url: String,
-    pub http_observers: Arc<HttpDataProviderObserver>,
-    pub backup_cache: Arc<dyn HttpDataProviderObserverTrait + Sync + Send>,
-}
-
-impl SharedDictDcsRequestBuilder {
-    pub fn new(
-        base_url: String,
-        http_observers: Arc<HttpDataProviderObserver>,
-        backup_cache: Arc<dyn HttpDataProviderObserverTrait + Sync + Send>,
-    ) -> SharedDictDcsRequestBuilder {
-        SharedDictDcsRequestBuilder {
-            base_url,
-            http_observers,
-            backup_cache,
-        }
-    }
-}
-
-#[async_trait]
-impl RequestBuilderTrait for SharedDictDcsRequestBuilder {
-    async fn make_request(
-        &self,
-        http_client: &reqwest::Client,
-        request_context: &Arc<AuthorizedRequestContext>,
-        lcut: u64,
-        zstd_dict_id: &Option<Arc<str>>,
-    ) -> Result<reqwest::Response, reqwest::Error> {
-        let mut url = match zstd_dict_id {
-            Some(dict_id) => format!(
-                "{}{}{}/{}.json",
-                self.base_url, request_context.path, dict_id, request_context.sdk_key
-            ),
-            None => format!(
-                "{}{}{}/{}.json",
-                self.base_url, request_context.path, "null", request_context.sdk_key
-            ),
-        };
-
-        if lcut != 0 {
-            url.push_str(&format!("?sinceTime={lcut}"));
-        }
-
-        let mut request = http_client
-            .get(url)
-            .version(Version::HTTP_2)
-            .header("x-sfp-version", get_package_version())
-            .timeout(Duration::from_secs(30));
-
-        if request_context.encodings != vec![CompressionEncoder::PlainText] {
-            request = request.header(
-                reqwest::header::ACCEPT_ENCODING,
-                format_compression_encodings(&request_context.encodings),
-            );
-        }
-
-        request.send().await
-    }
-
-    async fn is_an_update(
-        &self,
-        _body: &[u8],
-        headers: &reqwest::header::HeaderMap,
-        _sdk_key: &str,
+        _rc: &Arc<AuthorizedRequestContext>,
     ) -> bool {
         // If this header is not present, we default to "Yes, this is an update"
         // Otherwise, this header will be "true" if this is NOT an update.
@@ -277,8 +187,8 @@ impl RequestBuilderTrait for SharedDictDcsRequestBuilder {
 pub struct IdlistRequestBuilder {
     pub http_observers: Arc<HttpDataProviderObserver>,
     pub backup_cache: Arc<dyn HttpDataProviderObserverTrait + Sync + Send>,
-    last_request_by_key: RwLock<HashMap<String, Instant>>,
-    last_response_hash: RwLock<HashMap<String, String>>,
+    last_request_by_key: RwLock<HashMap<Arc<AuthorizedRequestContext>, Instant>>,
+    last_response_hash: RwLock<HashMap<Arc<AuthorizedRequestContext>, String>>,
 }
 
 impl IdlistRequestBuilder {
@@ -302,7 +212,6 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
         http_client: &reqwest::Client,
         request_context: &Arc<AuthorizedRequestContext>,
         _lcut: u64,
-        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Result<reqwest::Response, reqwest::Error> {
         match http_client
             .post("https://api.statsig.com/v1/get_id_lists".to_string())
@@ -322,7 +231,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
                 if status_code == 401 || status_code == 403 {
                     self.last_response_hash
                         .write()
-                        .remove(&request_context.sdk_key);
+                        .remove(Arc::as_ref(request_context));
                 }
                 Ok(response)
             }
@@ -334,17 +243,17 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
         &self,
         body: &[u8],
         _headers: &reqwest::header::HeaderMap,
-        sdk_key: &str,
+        rc: &Arc<AuthorizedRequestContext>,
     ) -> bool {
         let hash = format!("{:x}", Sha256::digest(body));
         let mut wlock = self.last_response_hash.write();
         let mut is_an_update = true;
-        if let Some(old_hash) = wlock.get(sdk_key) {
+        if let Some(old_hash) = wlock.get(rc) {
             is_an_update = hash != *old_hash;
         }
 
         if is_an_update {
-            wlock.insert(sdk_key.to_string(), hash);
+            wlock.insert(Arc::clone(rc), hash);
         }
 
         is_an_update
@@ -360,18 +269,17 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
 
     async fn should_make_request(&self, rc: &Arc<AuthorizedRequestContext>) -> bool {
         let mut wlock = self.last_request_by_key.write();
-        let key = rc.to_string();
-        match wlock.get_mut(&key) {
+        match wlock.get_mut(rc) {
             Some(last_request) => {
                 if last_request.elapsed() > Duration::from_secs(60) {
-                    wlock.insert(key, Instant::now());
+                    wlock.insert(Arc::clone(rc), Instant::now());
                     return true;
                 }
 
                 return false;
             }
             None => {
-                wlock.insert(key, Instant::now());
+                wlock.insert(Arc::clone(rc), Instant::now());
                 return true;
             }
         }

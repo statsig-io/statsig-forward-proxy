@@ -91,23 +91,18 @@ pub struct AuthorizedRequestContext {
     pub sdk_key: String,
     pub path: NormalizedPath,
     pub use_lcut: bool,
-    pub use_dict_id: bool,
     pub encodings: Vec<CompressionEncoder>,
 }
 
 impl AuthorizedRequestContext {
     pub fn new(sdk_key: String, path: NormalizedPath, encodings: Vec<CompressionEncoder>) -> Self {
         let use_lcut = path == NormalizedPath::V1DownloadConfigSpecs
-            || path == NormalizedPath::V2DownloadConfigSpecs
-            || path == NormalizedPath::V2DownloadConfigSpecsWithSharedDict;
-
-        let use_dict_id = path == NormalizedPath::V2DownloadConfigSpecsWithSharedDict;
+            || path == NormalizedPath::V2DownloadConfigSpecs;
 
         AuthorizedRequestContext {
             sdk_key,
             path,
             use_lcut,
-            use_dict_id,
             encodings,
         }
     }

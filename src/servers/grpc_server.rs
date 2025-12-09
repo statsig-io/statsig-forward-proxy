@@ -6,9 +6,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 
 use crate::datastore::config_spec_store::ConfigSpecStore;
-use crate::datastore::shared_dict_config_spec_store::{
-    get_dictionary_compressed_config_spec_and_shadow, SharedDictConfigSpecStore,
-};
 use crate::datastore::{self};
 use crate::observers::http_data_provider_observer::HttpDataProviderObserver;
 use crate::observers::proxy_event_observer::ProxyEventObserver;
@@ -49,10 +46,7 @@ static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone)]
 pub struct StatsigForwardProxyServerImpl {
     config_spec_store: Arc<datastore::config_spec_store::ConfigSpecStore>,
-    shared_dict_config_spec_store:
-        Arc<datastore::shared_dict_config_spec_store::SharedDictConfigSpecStore>,
     dcs_observer: Arc<HttpDataProviderObserver>,
-    shared_dict_dcs_observer: Arc<HttpDataProviderObserver>,
     update_broadcast_cache:
         Arc<RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>>,
     rc_cache: Arc<AuthorizedRequestContextCache>,
@@ -62,9 +56,7 @@ pub struct StatsigForwardProxyServerImpl {
 impl StatsigForwardProxyServerImpl {
     fn new(
         config_spec_store: Arc<ConfigSpecStore>,
-        shared_dict_config_spec_store: Arc<SharedDictConfigSpecStore>,
         dcs_observer: Arc<HttpDataProviderObserver>,
-        shared_dict_dcs_observer: Arc<HttpDataProviderObserver>,
         update_broadcast_cache: Arc<
             RwLock<HashMap<Arc<AuthorizedRequestContext>, Arc<StreamingChannel>>>,
         >,
@@ -73,9 +65,7 @@ impl StatsigForwardProxyServerImpl {
     ) -> Self {
         StatsigForwardProxyServerImpl {
             config_spec_store,
-            shared_dict_config_spec_store,
             dcs_observer,
-            shared_dict_dcs_observer,
             update_broadcast_cache,
             rc_cache,
             max_concurrent_streams,
@@ -94,10 +84,7 @@ impl StatsigForwardProxyServerImpl {
         }
         match get_api_version_from_request(request) {
             1 => NormalizedPath::V1DownloadConfigSpecs,
-            2 => match request.get_ref().zstd_dict_id.is_some() {
-                true => NormalizedPath::V2DownloadConfigSpecsWithSharedDict,
-                false => NormalizedPath::V2DownloadConfigSpecs,
-            },
+            2 => NormalizedPath::V2DownloadConfigSpecs,
             _ => NormalizedPath::RawPath(format!(
                 "/v{}/download_config_specs/",
                 get_api_version_from_request(request)
@@ -125,31 +112,13 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             StatsigForwardProxyServerImpl::get_normalized_path_from_request(&request),
             vec![CompressionEncoder::PlainText],
         );
-        let result = match authorized_request_context.path {
-            NormalizedPath::V2DownloadConfigSpecsWithSharedDict => {
-                get_dictionary_compressed_config_spec_and_shadow(
-                    Arc::clone(&self.rc_cache),
-                    &authorized_request_context,
-                    &self.shared_dict_config_spec_store,
-                    &self.config_spec_store,
-                    request.get_ref().since_time.unwrap_or(0),
-                    &request
-                        .get_ref()
-                        .zstd_dict_id
-                        .as_ref()
-                        .map(|s| Arc::from(s.as_str())),
-                )
-                .await
-            }
-            _ => {
-                self.config_spec_store
-                    .get_config_spec(
-                        &authorized_request_context,
-                        request.get_ref().since_time.unwrap_or(0),
-                    )
-                    .await
-            }
-        };
+        let result = self
+            .config_spec_store
+            .get_config_spec(
+                &authorized_request_context,
+                request.get_ref().since_time.unwrap_or(0),
+            )
+            .await;
         let data = match result {
             Some(data) => data,
             None => {
@@ -163,7 +132,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                 unsafe { String::from_utf8_unchecked(data.config.data.to_vec()) }
             },
             last_updated: data.lcut,
-            zstd_dict_id: data.zstd_dict_id.as_ref().map(|s| s.to_string()),
+            zstd_dict_id: None,
         };
 
         let mut response = Response::new(reply);
@@ -226,12 +195,8 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                 let sc = Arc::new(StreamingChannel::new(Arc::clone(&request_context)));
                 let streaming_channel_trait: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> =
                     sc.clone();
-                let streaming_channel_trait_clone = streaming_channel_trait.clone();
                 self.dcs_observer
                     .add_observer(streaming_channel_trait)
-                    .await;
-                self.shared_dict_dcs_observer
-                    .add_observer(streaming_channel_trait_clone)
                     .await;
                 let rv = sc.sender.read().await.subscribe();
                 wlock.insert(Arc::clone(&request_context), sc);
@@ -243,7 +208,6 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
         // After initial response, then start listening for updates
         let ubc_ref = Arc::clone(&self.update_broadcast_cache);
         let mut latest_lcut = init_value.last_updated;
-        let mut latest_zstd_dict_id = init_value.zstd_dict_id.as_ref().map(|s| s.to_string());
         rocket::tokio::spawn(async move {
             tx.send(Ok(init_value)).await.ok();
             ProxyEventObserver::publish_event(
@@ -262,16 +226,15 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                 match tokio::time::timeout(tokio::time::Duration::from_secs(30), rc.recv()).await {
                     Ok(Ok(maybe_csr)) => {
                         match maybe_csr {
-                            Some((data, lcut, zstd_dict_id)) => {
+                            Some((data, lcut)) => {
                                 latest_lcut = lcut;
-                                latest_zstd_dict_id = zstd_dict_id.as_ref().map(|s| s.to_string());
                                 match tx
                                     .send(Ok(ConfigSpecResponse {
                                         spec: unsafe {
                                             String::from_utf8_unchecked(data.data.to_vec())
                                         },
                                         last_updated: lcut,
-                                        zstd_dict_id: zstd_dict_id.map(|s| s.to_string()),
+                                        zstd_dict_id: None,
                                     }))
                                     .await
                                 {
@@ -314,7 +277,7 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
                             .send(Ok(ConfigSpecResponse {
                                 spec: NO_UPDATE_JSON.to_string(),
                                 last_updated: latest_lcut,
-                                zstd_dict_id: latest_zstd_dict_id.clone(),
+                                zstd_dict_id: None,
                             }))
                             .await
                         {
@@ -434,9 +397,7 @@ impl GrpcServer {
     pub async fn start_server(
         cli: &Cli,
         config_spec_store: Arc<ConfigSpecStore>,
-        shared_dict_config_spec_store: Arc<SharedDictConfigSpecStore>,
         shared_dcs_observer: Arc<HttpDataProviderObserver>,
-        shared_dict_dcs_observer: Arc<HttpDataProviderObserver>,
         rc_cache: Arc<AuthorizedRequestContextCache>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let http_addr = "0.0.0.0:50051".parse().unwrap();
@@ -444,9 +405,7 @@ impl GrpcServer {
         let update_broadcast_cache = Arc::new(RwLock::new(HashMap::new()));
         let sfp_server = StatsigForwardProxyServerImpl::new(
             config_spec_store,
-            shared_dict_config_spec_store,
             shared_dcs_observer,
-            shared_dict_dcs_observer,
             update_broadcast_cache.clone(),
             rc_cache,
             cli.grpc_max_concurrent_streams as usize,

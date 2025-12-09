@@ -19,7 +19,7 @@ use crate::servers::authorized_request_context::AuthorizedRequestContext;
 pub struct StreamingChannel {
     request_context: Arc<AuthorizedRequestContext>,
     last_updated: Arc<RwLock<u64>>,
-    pub sender: Arc<RwLock<Sender<Option<(Arc<ResponsePayload>, u64, Option<Arc<str>>)>>>>,
+    pub sender: Arc<RwLock<Sender<Option<(Arc<ResponsePayload>, u64)>>>>,
 }
 
 impl StreamingChannel {
@@ -67,7 +67,6 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
                 .send(Some((
                     Arc::clone(&response_context.body),
                     response_context.lcut,
-                    response_context.zstd_dict_id.clone(),
                 )))
                 .is_err()
             {
@@ -83,7 +82,6 @@ impl HttpDataProviderObserverTrait for StreamingChannel {
     async fn get(
         &self,
         _request_context: &Arc<AuthorizedRequestContext>,
-        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         unimplemented!("Not Used")
     }

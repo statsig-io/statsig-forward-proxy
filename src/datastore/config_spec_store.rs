@@ -20,7 +20,6 @@ use dashmap::DashMap;
 #[derive(Clone, Debug)]
 pub struct ConfigSpecForCompany {
     pub lcut: u64,
-    pub zstd_dict_id: Option<Arc<str>>,
     pub config: Arc<ResponsePayload>,
 }
 
@@ -53,7 +52,6 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                 let rc = Arc::clone(&request_context.authorized_request_context);
                 let new_data = Arc::new(ConfigSpecForCompany {
                     lcut: response_context.lcut,
-                    zstd_dict_id: response_context.zstd_dict_id.clone(),
                     config: response_context.body.clone(),
                 });
                 self.store.insert(rc, new_data);
@@ -69,7 +67,6 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
             if response_context.lcut > stored_lcut {
                 let new_data = Arc::new(ConfigSpecForCompany {
                     lcut: response_context.lcut,
-                    zstd_dict_id: response_context.zstd_dict_id.clone(),
                     config: response_context.body.clone(),
                 });
                 self.store
@@ -100,7 +97,6 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
     async fn get(
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
-        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         self.store.get(request_context).map(|record| record.clone())
     }
@@ -134,7 +130,6 @@ impl ConfigSpecStore {
                 self.background_data_provider.clone(),
                 request_context,
                 0,
-                &None,
                 // Since it's a cache-miss, it doesn't matter what we do
                 // if we receive a 4xx, so no point clearing any
                 // caches
@@ -159,7 +154,6 @@ impl ConfigSpecStore {
                 } else {
                     Some(Arc::new(ConfigSpecForCompany {
                         lcut,
-                        zstd_dict_id: None,
                         config: Arc::clone(&self.no_update_config),
                     }))
                 }

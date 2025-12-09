@@ -120,6 +120,11 @@ else
     TEMPLATE_FILE="/nginx-http-https.conf.template"
 fi
 
+# Ensure the cache directory exists and is writable (works for /dev/shm as non-root)
+mkdir -p "$PROXY_CACHE_PATH_CONFIGURATION"
+
+NGINX_CONF="/tmp/nginx.conf"
+
 sed -e "s|{{PROXY_CACHE_PATH_CONFIGURATION}}|$PROXY_CACHE_PATH_CONFIGURATION|g" \
     -e "s|{{PROXY_CACHE_MAX_SIZE_IN_MB}}|$PROXY_CACHE_MAX_SIZE_IN_MB|g" \
     -e "s|{{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}}|$PROXY_CACHE_CLEANUP_MAX_DURATION_MS|g" \
@@ -129,13 +134,13 @@ sed -e "s|{{PROXY_CACHE_PATH_CONFIGURATION}}|$PROXY_CACHE_PATH_CONFIGURATION|g" 
     -e "s|{{SSL_KEY_PATH}}|$SSL_KEY_PATH|g" \
     -e "s|{{CLIENT_CA_PATH}}|$CLIENT_CA_PATH|g" \
     -e "s|{{SSL_VERIFY_CLIENT}}|$SSL_VERIFY_CLIENT|g" \
-    "$TEMPLATE_FILE" > /etc/nginx/nginx.conf
+    "$TEMPLATE_FILE" > "$NGINX_CONF"
 
-if ! nginx -t >/dev/null 2>&1; then
-    nginx -t
+if ! nginx -t -g 'pid /tmp/nginx.pid;' -c "$NGINX_CONF" >/dev/null 2>&1; then
+    nginx -t -g 'pid /tmp/nginx.pid;' -c "$NGINX_CONF"
     exit 1
 fi
 
-nginx > /dev/null 2>&1 &
+nginx -g 'pid /tmp/nginx.pid;' -c "$NGINX_CONF" > /dev/null 2>&1 &
 
 exec statsig_forward_proxy "$@"
