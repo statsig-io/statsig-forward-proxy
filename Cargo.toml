@@ -1,6 +1,6 @@
 [package]
 name = "statsig-forward-proxy"
-version = "3.2.4"
+version = "4.0.0"
 edition = "2021"
 rust-version = "1.88.0"
 

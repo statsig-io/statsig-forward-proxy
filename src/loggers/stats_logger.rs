@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tokio::runtime::Handle;
 
 use statsig::Statsig;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::{env, time::Duration};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -20,7 +20,7 @@ use crate::observers::OperationType;
 use fxhash::FxHashMap;
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::{global, KeyValue};
-use opentelemetry_otlp::{Protocol, WithExportConfig};
+use opentelemetry_otlp::{ExporterBuildError, MetricExporter, Protocol, WithExportConfig};
 
 use smallvec::SmallVec;
 
@@ -38,12 +38,60 @@ pub struct EnvConfig {
     pub datadog_sender_buffer_size: Option<u64>,
 
     pub otel_exporter_endpoint: Option<String>,
+    pub otel_exporter_otlp_protocol: Option<String>,
 }
 
 lazy_static! {
     static ref CONFIG: EnvConfig = envy::from_env().expect("Malformed config");
     static ref TAG_CACHE: Mutex<FxHashMap<ProxyEvent, (Arc<SmallVec<[String; 4]>>, Instant)>> =
         Mutex::new(FxHashMap::default());
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LoggingFlags {
+    statsd: bool,
+    datadog: bool,
+    statsig: bool,
+    otlp: bool,
+}
+
+const DEFAULT_LOGGING_FLAGS: LoggingFlags = LoggingFlags {
+    statsd: false,
+    datadog: false,
+    statsig: false,
+    otlp: false,
+};
+
+static LOGGING_FLAGS: OnceLock<LoggingFlags> = OnceLock::new();
+
+fn logging_flags() -> &'static LoggingFlags {
+    LOGGING_FLAGS.get().unwrap_or(&DEFAULT_LOGGING_FLAGS)
+}
+
+fn statsd_logging_enabled() -> bool {
+    logging_flags().statsd
+}
+
+fn datadog_logging_enabled() -> bool {
+    logging_flags().datadog
+}
+
+fn statsig_logging_enabled() -> bool {
+    logging_flags().statsig
+}
+
+fn otlp_logging_enabled() -> bool {
+    logging_flags().otlp
+}
+
+fn init_logging_flags(new_flags: LoggingFlags) {
+    if LOGGING_FLAGS.set(new_flags).is_err() && *logging_flags() != new_flags {
+        eprintln!(
+            "Attempted to reset logging flags from {:?} to {:?}; keeping original values.",
+            logging_flags(),
+            new_flags
+        );
+    }
 }
 
 /**
@@ -67,7 +115,6 @@ struct Operation {
 
 pub struct StatsLogger {
     sender: Sender<Operation>,
-    enable_datadog_logging: bool,
 }
 
 fn get_hostname() -> String {
@@ -84,18 +131,19 @@ impl StatsLogger {
         enable_statsig_logging: bool,
         enable_otlp_logging: bool,
     ) -> Self {
+        init_logging_flags(LoggingFlags {
+            statsd: enable_statsd_logging,
+            datadog: enable_datadog_logging,
+            statsig: enable_statsig_logging,
+            otlp: enable_otlp_logging,
+        });
+
         let (tx, rx): (Sender<Operation>, Receiver<Operation>) = mpsc::channel(
             usize::try_from(CONFIG.datadog_sender_buffer_size.unwrap_or(50000)).unwrap(),
         );
         rocket::tokio::task::spawn_blocking(move || {
             Handle::current().block_on(async move {
-                batching::process_operations(
-                    rx,
-                    enable_statsd_logging || enable_datadog_logging,
-                    enable_statsig_logging,
-                    enable_otlp_logging,
-                )
-                .await;
+                batching::process_operations(rx).await;
             });
         });
 
@@ -119,10 +167,7 @@ impl StatsLogger {
             });
         });
 
-        StatsLogger {
-            sender: tx,
-            enable_datadog_logging,
-        }
+        StatsLogger { sender: tx }
     }
 
     fn get_or_create_tags(event: &ProxyEvent) -> Arc<SmallVec<[String; 4]>> {
@@ -163,8 +208,7 @@ impl ProxyEventObserverTrait for StatsLogger {
             let tags = StatsLogger::get_or_create_tags(event);
 
             let suffix = operation_suffix(&stat.operation_type);
-            let operation_type =
-                determine_operation_type(&stat.operation_type, self.enable_datadog_logging);
+            let operation_type = determine_operation_type(&stat.operation_type);
 
             if let Err(e) = self
                 .sender
@@ -230,12 +274,9 @@ fn operation_suffix(operation_type: &OperationType) -> &'static str {
     }
 }
 
-fn determine_operation_type(
-    stat_operation_type: &OperationType,
-    enable_datadog_logging: bool,
-) -> OperationType {
+fn determine_operation_type(stat_operation_type: &OperationType) -> OperationType {
     match stat_operation_type {
-        OperationType::Distribution | OperationType::Timing if enable_datadog_logging => {
+        OperationType::Distribution | OperationType::Timing if datadog_logging_enabled() => {
             OperationType::Distribution
         }
         OperationType::Distribution | OperationType::Timing => OperationType::Timing,
@@ -264,23 +305,25 @@ mod batching {
 
     use super::*;
 
-    fn send(
-        event: Operation,
-        write_to_statsd: bool,
-        write_to_statsig: bool,
-        write_to_otlp: bool,
-    ) -> bool {
-        if write_to_statsig {
+    fn send(event: Operation) -> bool {
+        let mut wrote = false;
+
+        if statsig_logging_enabled() {
             send_to_statsig(&event);
+            wrote = true;
         }
 
-        if write_to_statsd {
+        if statsd_logging_enabled() || datadog_logging_enabled() {
             send_to_statsd(&event);
+            wrote = true;
         }
-        if write_to_otlp {
+
+        if otlp_logging_enabled() {
             send_to_otlp(&event);
+            wrote = true;
         }
-        true
+
+        wrote
     }
 
     fn send_to_statsig(event: &Operation) {
@@ -330,35 +373,22 @@ mod batching {
     async fn flush(
         batch: Vec<Operation>,
         incr_op_map: FxHashMap<(String, Arc<SmallVec<[String; 4]>>), i64>,
-        write_to_statsd: bool,
-        write_to_statsig: bool,
-        write_to_otlp: bool,
     ) {
         for ((counter_name, tags), incr_amount) in incr_op_map {
-            send(
-                Operation {
-                    operation_type: OperationType::IncrByValue,
-                    counter_name,
-                    value: incr_amount,
-                    tags,
-                },
-                write_to_statsd,
-                write_to_statsig,
-                write_to_otlp,
-            );
+            send(Operation {
+                operation_type: OperationType::IncrByValue,
+                counter_name,
+                value: incr_amount,
+                tags,
+            });
         }
 
         for event in batch {
-            send(event, write_to_statsd, write_to_statsig, write_to_otlp);
+            send(event);
         }
     }
 
-    pub(crate) async fn process_operations(
-        mut rx: Receiver<Operation>,
-        write_to_statsd: bool,
-        write_to_statsig: bool,
-        write_to_otlp: bool,
-    ) {
+    pub(crate) async fn process_operations(mut rx: Receiver<Operation>) {
         let mut batch = Vec::with_capacity(CONFIG.datadog_max_batch_event_count.unwrap_or(3000));
         let mut incr_op_map: FxHashMap<(String, Arc<SmallVec<[String; 4]>>), i64> =
             FxHashMap::default();
@@ -385,13 +415,7 @@ mod batching {
                     {
                         let final_batch = std::mem::take(&mut batch);
                         let final_incr_op_map = std::mem::take(&mut incr_op_map);
-                        tokio::spawn(flush(
-                            final_batch,
-                            final_incr_op_map,
-                            write_to_statsd,
-                            write_to_statsig,
-                            write_to_otlp
-                        ));
+                        tokio::spawn(flush(final_batch, final_incr_op_map));
                         last_updated = Instant::now();
                     }
                 },
@@ -549,14 +573,7 @@ struct OTLPLogger {
 
 impl OTLPLogger {
     pub fn new() -> Option<Self> {
-        let mut exporter_builder = opentelemetry_otlp::MetricExporter::builder()
-            .with_http()
-            .with_protocol(Protocol::HttpJson);
-        if let Some(e) = &CONFIG.otel_exporter_endpoint {
-            exporter_builder = exporter_builder.with_endpoint(e);
-        }
-        exporter_builder
-            .build()
+        Self::build_metrics_exporter()
             .ok()
             .map(|e| {
                 let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
@@ -571,6 +588,33 @@ impl OTLPLogger {
                 gauge_map: RwLock::new(FxHashMap::default()),
                 histogram_map: RwLock::new(FxHashMap::default()),
             })
+    }
+
+    fn build_metrics_exporter() -> Result<MetricExporter, ExporterBuildError> {
+        let otlp_protocol = CONFIG
+            .otel_exporter_otlp_protocol
+            .clone()
+            .unwrap_or("http/json".to_string());
+        if otlp_protocol == "grpc" {
+            let mut exporter_builder = opentelemetry_otlp::MetricExporter::builder()
+                .with_tonic()
+                .with_protocol(Protocol::Grpc);
+            if let Some(e) = &CONFIG.otel_exporter_endpoint {
+                exporter_builder = exporter_builder.with_endpoint(e);
+            }
+            exporter_builder.build()
+        } else {
+            let mut exporter_builder = opentelemetry_otlp::MetricExporter::builder().with_http();
+            if otlp_protocol == "http/protobuf" {
+                exporter_builder = exporter_builder.with_protocol(Protocol::HttpBinary);
+            } else {
+                exporter_builder = exporter_builder.with_protocol(Protocol::HttpJson);
+            }
+            if let Some(e) = &CONFIG.otel_exporter_endpoint {
+                exporter_builder = exporter_builder.with_endpoint(e);
+            }
+            exporter_builder.build()
+        }
     }
 
     fn send_histogram_event(&self, event: &Operation) {

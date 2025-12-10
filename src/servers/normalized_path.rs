@@ -13,7 +13,6 @@ pub enum NormalizedPath {
     V1DownloadConfigSpecs,
     V1GetIdLists,
     V1LogEvent,
-    V2DownloadConfigSpecsWithSharedDict,
     V2DownloadConfigSpecs,
     RawPath(String),
 }
@@ -30,7 +29,6 @@ impl NormalizedPath {
             NormalizedPath::V1DownloadConfigSpecs => "/v1/download_config_specs/",
             NormalizedPath::V1GetIdLists => "/v1/get_id_lists/",
             NormalizedPath::V1LogEvent => "/v1/log_event/",
-            NormalizedPath::V2DownloadConfigSpecsWithSharedDict => "/v2/download_config_specs/d/",
             NormalizedPath::V2DownloadConfigSpecs => "/v2/download_config_specs/",
             NormalizedPath::RawPath(path) => path,
         }
@@ -45,8 +43,6 @@ impl From<&str> for NormalizedPath {
             NormalizedPath::V1GetIdLists
         } else if value.starts_with("/v1/log_event") {
             NormalizedPath::V1LogEvent
-        } else if value.starts_with("/v2/download_config_specs/d") {
-            NormalizedPath::V2DownloadConfigSpecsWithSharedDict
         } else if value.starts_with("/v2/download_config_specs") {
             NormalizedPath::V2DownloadConfigSpecs
         } else {
@@ -89,7 +85,6 @@ mod tests {
         test_v1_download_config_specs: "/v1/download_config_specs" => NormalizedPath::V1DownloadConfigSpecs,
         test_v1_get_id_lists: "/v1/get_id_lists" => NormalizedPath::V1GetIdLists,
         test_v1_log_event: "/v1/log_event" => NormalizedPath::V1LogEvent,
-        test_v2_download_config_specs_with_shared_dict: "/v2/download_config_specs/d" => NormalizedPath::V2DownloadConfigSpecsWithSharedDict,
         test_v2_download_config_specs: "/v2/download_config_specs" => NormalizedPath::V2DownloadConfigSpecs,
     }
 

@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1.88.0-alpine3.20 AS builder
+FROM rust:1.88.0-alpine3.20 AS builder
 
 RUN apk update && apk add git curl build-base autoconf automake libtool pkgconfig libressl-dev musl-dev gcc libc-dev g++ libffi-dev
 
@@ -47,7 +47,7 @@ COPY ./api-interface-definitions ./api-interface-definitions
 RUN rm ./target/release/deps/server*
 RUN cargo build --release
 
-FROM nginx:alpine
+FROM nginxinc/nginx-unprivileged:1.29.1-alpine-perl
 
 # Copy the build artifact from the build stage
 COPY --from=builder /statsig_forward_proxy/target/release/server /usr/local/bin/statsig_forward_proxy
@@ -71,9 +71,8 @@ COPY nginx-http-only.conf.template /nginx-http-only.conf.template
 COPY nginx-http-https.conf.template /nginx-http-https.conf.template
 COPY nginx-https-only.conf.template /nginx-https-only.conf.template
 
-# Create an entrypoint script
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Create an entrypoint script (set executable at copy time)
+COPY --chmod=0755 entrypoint.sh /entrypoint.sh
 
-# Use ENTRYPOINT to run the script
+# Use ENTRYPOINT to run the script as non-root
 ENTRYPOINT ["/entrypoint.sh"]

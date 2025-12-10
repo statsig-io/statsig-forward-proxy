@@ -27,7 +27,6 @@ pub trait HttpDataProviderObserverTrait {
     async fn get(
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
-        zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>>;
 }
 
@@ -139,7 +138,6 @@ pub struct ProxyEvent {
     pub event_type: ProxyEventType,
     request_context: Option<Arc<AuthorizedRequestContext>>,
     pub lcut: Option<u64>,
-    pub zstd_dict_id: Option<Arc<str>>,
     pub stat: Option<EventStat>,
     pub status_code: Option<u16>,
     pub response_encoding: Option<String>,
@@ -154,7 +152,6 @@ impl ProxyEvent {
             event_type,
             request_context: Some(Arc::clone(request_context)),
             lcut: None,
-            zstd_dict_id: None,
             stat: None,
             status_code: None,
             response_encoding: None,
@@ -166,7 +163,6 @@ impl ProxyEvent {
             event_type,
             request_context: None,
             lcut: None,
-            zstd_dict_id: None,
             stat: None,
             status_code: None,
             response_encoding: None,
@@ -219,11 +215,6 @@ impl ProxyEvent {
         self
     }
 
-    pub fn with_zstd_dict_id(mut self, zstd_dict_id: Option<Arc<str>>) -> Self {
-        self.zstd_dict_id = zstd_dict_id;
-        self
-    }
-
     pub fn with_stat(mut self, stat: EventStat) -> Self {
         self.stat = Some(stat);
         self
@@ -252,7 +243,6 @@ impl Hash for ProxyEvent {
             rc.path.hash(state);
         }
         self.lcut.hash(state);
-        self.zstd_dict_id.hash(state);
         self.status_code.hash(state);
     }
 }
@@ -262,7 +252,6 @@ impl PartialEq for ProxyEvent {
         self.request_context == other.request_context
             && self.lcut == other.lcut
             && self.status_code == other.status_code
-            && self.zstd_dict_id == other.zstd_dict_id
     }
 }
 

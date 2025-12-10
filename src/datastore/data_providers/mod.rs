@@ -20,19 +20,16 @@ pub trait DataProviderTrait {
         request_builder: &Arc<dyn RequestBuilderTrait>,
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
-        zstd_dict_id: &Option<Arc<str>>,
     ) -> DataProviderResult;
 }
 
 pub struct FullRequestContext {
     pub authorized_request_context: Arc<AuthorizedRequestContext>,
-    pub zstd_dict_id: Option<Arc<str>>,
 }
 
 pub struct ResponseContext {
     pub result_type: DataProviderRequestResult,
     pub lcut: u64,
-    pub zstd_dict_id: Option<Arc<str>>,
     pub body: Arc<ResponsePayload>,
 }
 
@@ -50,5 +47,4 @@ pub struct DataProviderResult {
     // encoding: CompressionEncoder,
     body: Option<Arc<ResponsePayload>>,
     lcut: u64,
-    zstd_dict_id: Option<Arc<str>>,
 }

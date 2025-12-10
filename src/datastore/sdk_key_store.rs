@@ -25,11 +25,11 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
                         .keystore
                         .read()
                         .get(&request_context.authorized_request_context)
-                        .map_or(true, |v| v.0 < response_context.lcut)
+                        .map_or(true, |v| *v < response_context.lcut)
                 {
                     self.keystore.write().insert(
                         Arc::clone(&request_context.authorized_request_context),
-                        (response_context.lcut, response_context.zstd_dict_id.clone()),
+                        response_context.lcut,
                     );
                 }
             }
@@ -45,7 +45,6 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
     async fn get(
         &self,
         _request_context: &Arc<AuthorizedRequestContext>,
-        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         None
     }
@@ -55,10 +54,9 @@ impl HttpDataProviderObserverTrait for SdkKeyStore {
 pub struct SdkKeyStoreItem {
     pub request_context: Arc<AuthorizedRequestContext>,
     pub lcut: u64,
-    pub zstd_dict_id: Option<Arc<str>>,
 }
 
-type SdkKeyStoreValue = (u64, Option<Arc<str>>);
+type SdkKeyStoreValue = u64; // LCUT
 pub struct SdkKeyStore {
     keystore: Arc<RwLock<HashMap<Arc<AuthorizedRequestContext>, SdkKeyStoreValue>>>,
 }
@@ -86,8 +84,7 @@ impl SdkKeyStore {
             .iter()
             .map(|(key, value)| SdkKeyStoreItem {
                 request_context: key.clone(),
-                lcut: value.0,
-                zstd_dict_id: value.1.clone(),
+                lcut: *value,
             })
             .collect()
     }

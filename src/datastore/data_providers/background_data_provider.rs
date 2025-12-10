@@ -17,7 +17,7 @@ use tokio::time::Duration;
 
 use dashmap::DashMap;
 
-type ForegroundFetchLockKey = (Arc<AuthorizedRequestContext>, Option<Arc<str>>);
+type ForegroundFetchLockKey = Arc<AuthorizedRequestContext>;
 pub struct BackgroundDataProvider {
     http_data_prover: Arc<HttpDataProvider>,
     polling_interval_in_s: u64,
@@ -32,10 +32,9 @@ pub async fn foreground_fetch(
     bdp: Arc<BackgroundDataProvider>,
     request_context: &Arc<AuthorizedRequestContext>,
     since_time: u64,
-    zstd_dict_id: &Option<Arc<str>>,
     clear_datastore_on_unauthorized: bool,
 ) {
-    let key = (Arc::clone(request_context), zstd_dict_id.clone());
+    let key = Arc::clone(request_context);
     let lock_ref: Arc<RwLock<bool>> = bdp
         .foreground_fetch_lock
         .entry(key.clone())
@@ -54,7 +53,6 @@ pub async fn foreground_fetch(
                 vec![SdkKeyStoreItem {
                     request_context: Arc::clone(request_context),
                     lcut: since_time,
-                    zstd_dict_id: zstd_dict_id.clone(),
                 }],
                 &bdp.http_data_prover,
                 1,
@@ -164,10 +162,8 @@ impl BackgroundDataProvider {
                                 request_builder,
                                 &Arc::new(FullRequestContext {
                                     authorized_request_context: Arc::clone(&item.request_context),
-                                    zstd_dict_id: item.zstd_dict_id.clone(),
                                 }),
                                 item.lcut,
-                                &item.zstd_dict_id,
                                 &client_clone,
                                 clear_datastore_on_unauthorized,
                             ),
@@ -204,7 +200,6 @@ impl BackgroundDataProvider {
         request_builder: Arc<dyn RequestBuilderTrait>,
         request_context: &Arc<FullRequestContext>,
         lcut: u64,
-        zstd_dict_id: &Option<Arc<str>>,
         http_client: &reqwest::Client,
         clear_datastore_on_unauthorized: bool,
     ) {
@@ -214,7 +209,6 @@ impl BackgroundDataProvider {
                 &request_builder,
                 &request_context.authorized_request_context,
                 lcut,
-                zstd_dict_id,
             )
             .await;
 
@@ -229,7 +223,6 @@ impl BackgroundDataProvider {
                             &Arc::new(ResponseContext {
                                 result_type: dp_result.result,
                                 lcut: dp_result.lcut,
-                                zstd_dict_id: dp_result.zstd_dict_id,
                                 body: data,
                             }),
                             &request_builder,
@@ -241,7 +234,7 @@ impl BackgroundDataProvider {
             DataProviderRequestResult::Error => {
                 if let Some(backup_data) = request_builder
                     .get_backup_cache()
-                    .get(&request_context.authorized_request_context, zstd_dict_id)
+                    .get(&request_context.authorized_request_context)
                     .await
                 {
                     Self::notify_observers(
@@ -249,7 +242,6 @@ impl BackgroundDataProvider {
                         &Arc::new(ResponseContext {
                             result_type: dp_result.result,
                             lcut: backup_data.lcut,
-                            zstd_dict_id: backup_data.zstd_dict_id.clone(),
                             body: Arc::clone(&backup_data.config),
                         }),
                         &request_builder,
@@ -264,7 +256,6 @@ impl BackgroundDataProvider {
                         &Arc::new(ResponseContext {
                             result_type: dp_result.result,
                             lcut,
-                            zstd_dict_id: dp_result.zstd_dict_id,
                             body: Arc::new(ResponsePayload {
                                 encoding: Arc::new(CompressionEncoder::PlainText),
                                 data: Arc::new(Bytes::new()),

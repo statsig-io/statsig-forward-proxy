@@ -34,7 +34,6 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub struct RedisCache {
-    key_prefix: String,
     connection: Option<bb8::Pool<RedisConnectionManager>>,
     hash_cache: Arc<RwLock<HashMap<String, String>>>,
     uuid: String,
@@ -83,10 +82,15 @@ impl HttpDataProviderObserverTrait for RedisCache {
         if self.double_write_cache_for_legacy_key {
             self.update_impl(
                 format!(
-                    "{}::{}",
-                    self.key_prefix,
-                    self.hash_key(&request_context.authorized_request_context.sdk_key, false)
-                        .await
+                    "statsig|{}|{}|{}",
+                    request_context
+                        .authorized_request_context
+                        .path
+                        .as_str()
+                        .trim_end_matches('/'),
+                    CompressionEncoder::PlainText,
+                    self.hash_key(&request_context.authorized_request_context.sdk_key, true)
+                        .await,
                 ),
                 &response_context.result_type,
                 &request_context.authorized_request_context,
@@ -100,7 +104,6 @@ impl HttpDataProviderObserverTrait for RedisCache {
     async fn get(
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
-        _zstd_dict_id: &Option<Arc<str>>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         let connection = self.connection.as_ref()?.get().await;
         let redis_key = self.get_redis_key(request_context).await;
@@ -166,7 +169,6 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                             data: Arc::from(Bytes::from(compressed)),
                                         }),
                                         lcut: lcut.unwrap_or(0),
-                                        zstd_dict_id: None,
                                     }))
                                 }
                                 false => Some(Arc::new(ConfigSpecForCompany {
@@ -175,7 +177,6 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                         data: Arc::from(Bytes::from(data)),
                                     }),
                                     lcut: lcut.unwrap_or(0),
-                                    zstd_dict_id: None,
                                 })),
                             }
                         }
@@ -213,7 +214,6 @@ impl HttpDataProviderObserverTrait for RedisCache {
 
 impl RedisCache {
     pub async fn new(
-        key_prefix: String,
         leader_key_ttl: i64,
         uuid: &str,
         check_lcut: bool,
@@ -227,15 +227,17 @@ impl RedisCache {
             false => "redis",
         };
         let user = config.redis_enterprise_user.unwrap_or("".to_string());
-        let password = match config.redis_enterprise_password {
-            Some(password) => format!("{password}@"),
-            None => "".to_string(),
-        };
+        let password = config
+            .redis_enterprise_password
+            .map(|pass| format!(":{pass}"))
+            .unwrap_or("".to_string());
+        let mut credentials = format!("{user}{password}");
+        if !credentials.is_empty() {
+            credentials = format!("{credentials}@");
+        }
+
         let redis_url = format!(
-            "{protocol}://{user}{password}{host}:{port}",
-            user = user,
-            protocol = protocol,
-            password = password,
+            "{protocol}://{credentials}{host}:{port}",
             host = config.redis_enterprise_host,
             port = config.redis_enterprise_port
         );
@@ -256,7 +258,6 @@ impl RedisCache {
             .ok();
 
         RedisCache {
-            key_prefix,
             connection: redis_pool,
             hash_cache: Arc::new(RwLock::new(HashMap::new())),
             uuid: uuid.to_string(),
@@ -269,13 +270,16 @@ impl RedisCache {
 
     async fn get_redis_key(&self, request_context: &Arc<AuthorizedRequestContext>) -> String {
         // Key should match SDK
-        // Key should look like "statsg|v1/download_cofig_specs/{compression_encoding}|{hashed(key)}"
-        // For compression encoding, we only write plain text until we added support to decompress from sdk side
+        // New key schema uses the SDK key prefix (first 20 chars) instead of a hash
+        // Key looks like: "statsig|{path}|{compression_encoding}|{sdk_key_prefix}"
+        // For compression encoding, we only write plain text until we add support to decompress from sdk side
+        let mut sdk_key_prefix = request_context.sdk_key.clone();
+        sdk_key_prefix.truncate(20);
         format!(
             "statsig|{}|{}|{}",
             request_context.path.as_str().trim_end_matches('/'),
             CompressionEncoder::PlainText,
-            self.hash_key(&request_context.sdk_key, true).await
+            sdk_key_prefix
         )
     }
 
