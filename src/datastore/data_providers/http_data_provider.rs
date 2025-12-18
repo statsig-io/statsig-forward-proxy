@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use rocket::form::validate::Contains;
 use std::fmt::Write;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use reqwest::header::HeaderMap;
 #[derive(Debug)]
 pub struct ResponsePayload {
     pub encoding: Arc<CompressionEncoder>,
+    pub use_proto: bool,
     pub data: Arc<Bytes>,
 }
 
@@ -96,9 +98,9 @@ impl DataProviderTrait for HttpDataProvider {
                     Ok(encoding) => Some(encoding.to_string()),
                     Err(_e) => None,
                 });
-
+        let use_proto = self.parse_use_proto(&headers);
         self.handle_success(
-            (content_encoding, bytes),
+            (use_proto, content_encoding, bytes),
             since_time,
             start_time,
             request_context,
@@ -219,9 +221,18 @@ impl HttpDataProvider {
             })
     }
 
+    fn parse_use_proto(&self, headers: &HeaderMap) -> bool {
+        let content_type = headers.get("Content-Type").map(|s| {
+            let st = s.to_str();
+            st.unwrap_or("")
+        });
+
+        content_type.is_some_and(|c| c.contains("application/octet-stream"))
+    }
+
     async fn handle_success(
         &self,
-        (encoding_str, data): (Option<String>, Bytes),
+        (use_proto, encoding_str, data): (bool, Option<String>, Bytes),
         since_time: u64,
         start_time: Instant,
         request_context: &Arc<AuthorizedRequestContext>,
@@ -247,6 +258,7 @@ impl HttpDataProvider {
         DataProviderResult {
             result: DataProviderRequestResult::DataAvailable,
             body: Some(Arc::new(ResponsePayload {
+                use_proto,
                 encoding: Arc::from(encoding),
                 data: Arc::from(data),
             })),

@@ -4,6 +4,7 @@ pub enum CompressionEncoder {
     PlainText,
     Gzip,
     Brotli,
+    StatsigBrotli,
 }
 
 impl fmt::Display for CompressionEncoder {
@@ -12,6 +13,7 @@ impl fmt::Display for CompressionEncoder {
             CompressionEncoder::PlainText => write!(f, "plain_text"),
             CompressionEncoder::Gzip => write!(f, "gzip"),
             CompressionEncoder::Brotli => write!(f, "br"),
+            CompressionEncoder::StatsigBrotli => write!(f, "statsig-br"),
         }
     }
 }
@@ -27,6 +29,7 @@ impl FromStr for CompressionEncoder {
         match s.to_lowercase().as_str() {
             "gzip" => Ok(CompressionEncoder::Gzip),
             "br" => Ok(CompressionEncoder::Brotli),
+            "statsig-br" => Ok(CompressionEncoder::StatsigBrotli),
             _ => Ok(CompressionEncoder::PlainText),
         }
     }

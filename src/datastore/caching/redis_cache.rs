@@ -70,8 +70,12 @@ impl HttpDataProviderObserverTrait for RedisCache {
         response_context: &Arc<ResponseContext>,
     ) {
         self.update_impl(
-            self.get_redis_key(&request_context.authorized_request_context)
-                .await,
+            self.get_redis_key(
+                &request_context.authorized_request_context,
+                Some(&response_context.body),
+                false,
+            )
+            .await,
             &response_context.result_type,
             &request_context.authorized_request_context,
             response_context.lcut,
@@ -81,17 +85,12 @@ impl HttpDataProviderObserverTrait for RedisCache {
 
         if self.double_write_cache_for_legacy_key {
             self.update_impl(
-                format!(
-                    "statsig|{}|{}|{}",
-                    request_context
-                        .authorized_request_context
-                        .path
-                        .as_str()
-                        .trim_end_matches('/'),
-                    CompressionEncoder::PlainText,
-                    self.hash_key(&request_context.authorized_request_context.sdk_key, true)
-                        .await,
-                ),
+                self.get_redis_key(
+                    &request_context.authorized_request_context,
+                    Some(&response_context.body),
+                    true,
+                )
+                .await,
                 &response_context.result_type,
                 &request_context.authorized_request_context,
                 response_context.lcut,
@@ -106,7 +105,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
         request_context: &Arc<AuthorizedRequestContext>,
     ) -> Option<Arc<ConfigSpecForCompany>> {
         let connection = self.connection.as_ref()?.get().await;
-        let redis_key = self.get_redis_key(request_context).await;
+        let redis_key = self.get_redis_key(request_context, None, false).await;
         match connection {
             Ok(mut conn) => {
                 let mut pipe = redis::pipe();
@@ -167,6 +166,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                         config: Arc::new(ResponsePayload {
                                             encoding: Arc::new(CompressionEncoder::Gzip),
                                             data: Arc::from(Bytes::from(compressed)),
+                                            use_proto: false,
                                         }),
                                         lcut: lcut.unwrap_or(0),
                                     }))
@@ -175,6 +175,7 @@ impl HttpDataProviderObserverTrait for RedisCache {
                                     config: Arc::new(ResponsePayload {
                                         encoding: Arc::new(CompressionEncoder::PlainText),
                                         data: Arc::from(Bytes::from(data)),
+                                        use_proto: false,
                                     }),
                                     lcut: lcut.unwrap_or(0),
                                 })),
@@ -268,22 +269,40 @@ impl RedisCache {
         }
     }
 
-    async fn get_redis_key(&self, request_context: &Arc<AuthorizedRequestContext>) -> String {
+    async fn get_redis_key(
+        &self,
+        request_context: &Arc<AuthorizedRequestContext>,
+        response_payload: Option<&Arc<ResponsePayload>>,
+        use_legacy: bool,
+    ) -> String {
         // Key should match SDK
         // New key schema uses the SDK key prefix (first 20 chars) instead of a hash
         // Key looks like: "statsig|{path}|{compression_encoding}|{sdk_key_prefix}"
         // For compression encoding, we only write plain text until we add support to decompress from sdk side
-        let mut sdk_key_prefix = request_context.sdk_key.clone();
-        sdk_key_prefix.truncate(20);
+        let encoding = match response_payload {
+            Some(payload) => match payload.use_proto {
+                true => CompressionEncoder::StatsigBrotli,
+                false => CompressionEncoder::PlainText,
+            },
+            _ => CompressionEncoder::PlainText,
+        };
+        let sdk_key = if use_legacy {
+            self.hash_key(&request_context.sdk_key).await
+        } else {
+            let mut sdk_key_prefix = request_context.sdk_key.clone();
+            sdk_key_prefix.truncate(20);
+            sdk_key_prefix
+        };
+
         format!(
             "statsig|{}|{}|{}",
             request_context.path.as_str().trim_end_matches('/'),
-            CompressionEncoder::PlainText,
-            sdk_key_prefix
+            encoding,
+            sdk_key
         )
     }
 
-    async fn hash_key(&self, key: &str, use_base64_encode: bool) -> String {
+    async fn hash_key(&self, key: &str) -> String {
         if self.hash_cache.read().contains_key(key) {
             return self
                 .hash_cache
@@ -295,12 +314,7 @@ impl RedisCache {
 
         // Hash key so that we aren't loading a bunch of sdk keys
         // into memory
-        // TODO: Move hash into a util
-        let hashed_key = if use_base64_encode {
-            BASE64_STANDARD.encode(Sha256::digest(key)).to_string()
-        } else {
-            format!("{:x}", Sha256::digest(key))
-        };
+        let hashed_key = BASE64_STANDARD.encode(Sha256::digest(key)).to_string();
         self.hash_cache
             .write()
             .insert(key.to_string(), hashed_key.clone());
@@ -361,7 +375,7 @@ impl RedisCache {
 
                     if !request_context.use_lcut || should_update {
                         // TODO update here
-                        // We only store uncompressed data to redis for right now
+                        // We only store uncompressed json/proto data to redis for right now
                         let data_to_write = match *data.encoding {
                             CompressionEncoder::Gzip => {
                                 let mut decoder = GzDecoder::new(Cursor::new(&**data.data));
@@ -409,8 +423,8 @@ impl RedisCache {
                                     }
                                 }
                             }
+                            CompressionEncoder::StatsigBrotli => data.data.to_vec(),
                         };
-
                         // We currently only support writing data to redis as plain_text
                         match pipe
                             .hset(&redis_key, "encoding", "plain_text")

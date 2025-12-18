@@ -29,7 +29,7 @@ impl ProxyEventObserverTrait for DebugLogger {
             event.stat,
             event.get_path(),
             event.get_accept_encodings(),
-            event.response_encoding,
+            event.response_encoding
         );
     }
 }
