@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
+use crate::datastore::config_spec_store::shadow_fetch_json_config_spec;
 use crate::datastore::id_list_store::GetIdListStore;
 use crate::datastore::log_event_store::LogEventStore;
 use crate::datastore::sdk_key_store::SdkKeyStore;
@@ -16,10 +17,9 @@ use crate::observers::{ProxyEvent, ProxyEventType};
 use crate::servers::http_apis;
 use crate::utils::compress_encoder::convert_compression_encodings_from_header_map;
 use crate::utils::compress_encoder::CompressionEncoder;
+use crate::utils::request_helper::does_request_supports_proto;
 use crate::Cli;
 use bytes::Bytes;
-
-use cached::proc_macro::once;
 
 use rocket::fairing::AdHoc;
 
@@ -50,7 +50,8 @@ use lazy_static::lazy_static;
 lazy_static! {
     static ref UNAUTHORIZED_RESPONSE: Arc<ResponsePayload> = Arc::new(ResponsePayload {
         encoding: Arc::new(CompressionEncoder::PlainText),
-        data: Arc::from(Bytes::from("Unauthorized"))
+        data: Arc::from(Bytes::from("Unauthorized")),
+        use_proto: false
     });
 }
 
@@ -95,6 +96,7 @@ where
 enum RequestPayloads {
     Gzipped(Arc<Bytes>, u64),
     Brotli(Arc<Bytes>, u64),
+    Proto(Arc<Bytes>, u64),
     Plain(Arc<Bytes>, u64),
     Unauthorized(),
 }
@@ -116,6 +118,18 @@ impl<'r> Responder<'r, 'static> for RequestPayloads {
                 .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
                 .sized_body(data.len(), Cursor::new(DerefRef(data)))
                 .ok(),
+            RequestPayloads::Proto(data, lcut) => Response::build()
+                .status(Status::Ok)
+                .header(rocket::http::Header::new("Content-Encoding", "statsig-br"))
+                .header(
+                    match ContentType::parse_flexible("application/octet-stream") {
+                        Some(ct) => Header::new("Content-Type", ct.to_string()), // use parsed ContentType
+                        None => Header::new("Content-Type", "application/octet-stream"), // fallback
+                    },
+                )
+                .header(rocket::http::Header::new("x-since-time", lcut.to_string()))
+                .sized_body(data.len(), Cursor::new(DerefRef(data)))
+                .ok(),
             RequestPayloads::Plain(data, lcut) => Response::build()
                 .status(Status::Ok)
                 .header(ContentType::JSON)
@@ -134,26 +148,39 @@ impl<'r> Responder<'r, 'static> for RequestPayloads {
     }
 }
 
-#[get("/download_config_specs/<sdk_key_file>?<sinceTime>")]
+#[get("/download_config_specs/<sdk_key_file>?<sinceTime>&<supports_proto>")]
 async fn get_download_config_specs(
     config_spec_store: &State<Arc<ConfigSpecStore>>,
+    authorized_rc_cache: &State<Arc<AuthorizedRequestContextCache>>,
     #[allow(unused_variables)] sdk_key_file: &str,
     #[allow(non_snake_case)] sinceTime: Option<u64>,
+    #[allow(unused_variables)] supports_proto: Option<bool>,
     authorized_rc: AuthorizedRequestContextWrapper,
 ) -> RequestPayloads {
+    if supports_proto.unwrap_or(false) {
+        shadow_fetch_json_config_spec(
+            authorized_rc_cache.inner().clone(),
+            &authorized_rc.inner(),
+            config_spec_store.inner(),
+            sinceTime.unwrap_or(0),
+        );
+    }
     match config_spec_store
         .get_config_spec(&authorized_rc.inner(), sinceTime.unwrap_or(0))
         .await
     {
-        Some(data) => {
-            if *data.config.encoding == CompressionEncoder::Gzip {
-                RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut)
-            } else if *data.config.encoding == CompressionEncoder::Brotli {
-                RequestPayloads::Brotli(Arc::clone(&data.config.data), data.lcut)
-            } else {
-                RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut)
+        Some(data) => match &data.config.use_proto {
+            true => RequestPayloads::Proto(Arc::clone(&data.config.data), data.lcut),
+            false => {
+                if *data.config.encoding == CompressionEncoder::Gzip {
+                    RequestPayloads::Gzipped(Arc::clone(&data.config.data), data.lcut)
+                } else if *data.config.encoding == CompressionEncoder::Brotli {
+                    RequestPayloads::Brotli(Arc::clone(&data.config.data), data.lcut)
+                } else {
+                    RequestPayloads::Plain(Arc::clone(&data.config.data), data.lcut)
+                }
             }
-        }
+        },
         None => RequestPayloads::Unauthorized(),
     }
 }
@@ -186,18 +213,11 @@ async fn post_download_config_specs(
     }
 }
 
-#[once]
-fn log_deprecated_function() {
-    eprintln!("[SFP][Please Remove Use] /v1/get_id_lists is deprecated and will be removed in the next major version.");
-}
-
 #[post("/get_id_lists")]
 async fn post_get_id_lists(
     get_id_list_store: &State<Arc<GetIdListStore>>,
     authorized_rc: AuthorizedRequestContextWrapper,
 ) -> RequestPayloads {
-    log_deprecated_function();
-
     match get_id_list_store.get_id_lists(&authorized_rc.inner()).await {
         Some(data) => RequestPayloads::Plain(Arc::clone(&data.idlists.data), 0),
         None => RequestPayloads::Unauthorized(),
@@ -331,9 +351,11 @@ impl HttpServer {
                     let status_code = resp.status().code;
                     let status_class = resp.status().class();
                     let content_encoding = resp.headers().get("Content-Encoding").collect();
+                    let supports_proto = does_request_supports_proto(req);
                     // Spawn a new task to handle logging
                     tokio::spawn(async move {
-                        let request_context = cache.get_or_insert(sdk_key, path, encodings);
+                        let request_context =
+                            cache.get_or_insert(sdk_key, path, encodings, supports_proto);
 
                         let event = ProxyEvent::new_with_rc(
                             if status_class == StatusClass::Success {

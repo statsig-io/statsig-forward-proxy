@@ -7,7 +7,9 @@ use crate::observers::proxy_event_observer::ProxyEventObserver;
 use crate::observers::{
     EventStat, HttpDataProviderObserverTrait, OperationType, ProxyEvent, ProxyEventType,
 };
-use crate::servers::authorized_request_context::AuthorizedRequestContext;
+use crate::servers::authorized_request_context::{
+    AuthorizedRequestContext, AuthorizedRequestContextCache,
+};
 use crate::utils::compress_encoder::CompressionEncoder;
 use bytes::Bytes;
 
@@ -112,6 +114,7 @@ impl ConfigSpecStore {
             sdk_key_store,
             background_data_provider,
             no_update_config: Arc::new(ResponsePayload {
+                use_proto: false,
                 encoding: Arc::new(CompressionEncoder::PlainText),
                 data: Arc::new(Bytes::from_static(b"{\"has_updates\":false}")),
             }),
@@ -167,4 +170,26 @@ impl ConfigSpecStore {
             }
         }
     }
+}
+
+pub fn shadow_fetch_json_config_spec(
+    authorized_request_context_cache: Arc<AuthorizedRequestContextCache>,
+    rc: &Arc<AuthorizedRequestContext>,
+    config_spec_store: &Arc<ConfigSpecStore>,
+    since_time: u64,
+) {
+    let spec_store_clone: Arc<ConfigSpecStore> = Arc::clone(config_spec_store);
+    let rc_clone = Arc::clone(rc);
+    tokio::spawn(async move {
+        let shadow_request_context = authorized_request_context_cache.get_or_insert(
+            rc_clone.sdk_key.clone(),
+            rc_clone.path.clone(),
+            vec![CompressionEncoder::Gzip], // decompression is handled before committing to DataStore
+            false,                          // Fetch json format only
+        );
+
+        let _ = spec_store_clone
+            .get_config_spec(&shadow_request_context, since_time)
+            .await;
+    });
 }

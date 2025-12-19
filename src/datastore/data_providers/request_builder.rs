@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 
-use cached::proc_macro::once;
 use parking_lot::RwLock;
-use reqwest::Version;
+use reqwest::{
+    header::{HeaderMap, HeaderValue},
+    Version,
+};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 use tokio::time::{Duration, Instant};
@@ -22,6 +24,7 @@ use once_cell::sync::Lazy;
 type RequestBuilderCache = Lazy<Arc<RwLock<HashMap<NormalizedPath, Arc<dyn RequestBuilderTrait>>>>>;
 
 static REQUEST_BUILDERS: RequestBuilderCache = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+const SFP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct CachedRequestBuilders {}
 
@@ -117,11 +120,6 @@ impl DcsRequestBuilder {
     }
 }
 
-#[once]
-fn get_package_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
-}
-
 #[async_trait]
 impl RequestBuilderTrait for DcsRequestBuilder {
     async fn make_request(
@@ -130,21 +128,28 @@ impl RequestBuilderTrait for DcsRequestBuilder {
         request_context: &Arc<AuthorizedRequestContext>,
         lcut: u64,
     ) -> Result<reqwest::Response, reqwest::Error> {
-        let url = match lcut == 0 {
-            true => format!(
-                "{}{}{}.json",
-                self.base_url, request_context.path, request_context.sdk_key
-            ),
-            false => format!(
-                "{}{}{}.json?sinceTime={}",
-                self.base_url, request_context.path, request_context.sdk_key, lcut
-            ),
-        };
+        let url = format!(
+            "{}{}{}.json",
+            self.base_url, request_context.path, request_context.sdk_key
+        );
+
+        let mut query_params = HashMap::new();
+        let mut headers = HeaderMap::new();
+        if lcut > 0 {
+            query_params.insert("sinceTime", lcut.to_string());
+        }
+        if request_context.supports_proto {
+            query_params.insert("supports_proto", "true".to_string());
+            headers.insert("statsig-supports-proto", HeaderValue::from_static("true"));
+        }
+
+        headers.insert("x-sfp-version", HeaderValue::from_static(SFP_VERSION));
 
         let mut request = http_client
             .get(url)
+            .query(&query_params)
             .version(Version::HTTP_2)
-            .header("x-sfp-version", get_package_version())
+            .headers(headers)
             .timeout(Duration::from_secs(30));
 
         if request_context.encodings != vec![CompressionEncoder::PlainText] {
@@ -215,7 +220,7 @@ impl RequestBuilderTrait for IdlistRequestBuilder {
     ) -> Result<reqwest::Response, reqwest::Error> {
         match http_client
             .post("https://api.statsig.com/v1/get_id_lists".to_string())
-            .header("x-sfp-version", get_package_version())
+            .header("x-sfp-version", SFP_VERSION)
             .header("statsig-api-key", request_context.sdk_key.clone())
             .timeout(Duration::from_secs(30))
             .body("{}".to_string())

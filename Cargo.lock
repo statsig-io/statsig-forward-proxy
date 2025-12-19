@@ -2904,7 +2904,7 @@ dependencies = [
 
 [[package]]
 name = "statsig-forward-proxy"
-version = "4.0.0"
+version = "4.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",

@@ -259,6 +259,7 @@ impl BackgroundDataProvider {
                             body: Arc::new(ResponsePayload {
                                 encoding: Arc::new(CompressionEncoder::PlainText),
                                 data: Arc::new(Bytes::new()),
+                                use_proto: false,
                             }),
                         }),
                         &request_builder,
