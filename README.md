@@ -113,9 +113,10 @@ configured correctly.
 
 We leverage nginx to leverage it as a passthrough proxy with request queueing, per recommendation of the [rocket framework](https://rocket.rs/guide/v0.5/deploying/#overview).
 
-In addition to this, we leverage it as a cache. To configure this cache, we expose two environment variables:
+In addition to this, we leverage it as a cache. To configure this cache, we expose three environment variables:
 - PROXY_CACHE_PATH_CONFIGURATION: The directory at which to store cached data, by default, is /dev/shm
 - PROXY_CACHE_MAX_SIZE_IN_MB: The size of the nginx cache, which by default is 1024mb
+- PROXY_CACHE_TTL: TTL for cached 200 responses in nginx (first layer cache), default 5s (must include a unit, e.g. 500ms, 5s, 1m)
 
 Note: In most cases, the default size limit for /dev/shm is 64mb, in our next major version release, we plan to align the default value for PROXY_CACHE_MAX_SIZE_IN_MB to this. In most scenarios, this should not matter, however, if your config spec payload is multiple MB, this is something to be aware of.
 

@@ -3,6 +3,7 @@ set -e
 
 export PROXY_CACHE_PATH_CONFIGURATION=${PROXY_CACHE_PATH_CONFIGURATION:-"/dev/shm/nginx"}
 export PROXY_CACHE_MAX_SIZE_IN_MB=${PROXY_CACHE_MAX_SIZE_IN_MB:-"1024"}
+export PROXY_CACHE_TTL=${PROXY_CACHE_TTL:-"5s"}
 export PROXY_CACHE_CLEANUP_MAX_DURATION_MS=${PROXY_CACHE_CLEANUP_MAX_DURATION_MS:-"200"}
 export PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS=${PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS:-"50"}
 export PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL=${PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL:-"100"}
@@ -42,6 +43,31 @@ validate_boolean() {
         echo "Error: $arg_name must be 'true' or 'false', got: $value" >&2
         exit 1
     fi
+}
+
+validate_nginx_duration() {
+    local value="$1"
+    local arg_name="$2"
+
+    if [ -z "$value" ]; then
+        echo "Error: $arg_name requires a value" >&2
+        exit 1
+    fi
+
+    # Keep this strict to avoid generating invalid nginx.conf and to keep sed substitution safe.
+    # nginx supports time units; we accept a common subset customers will use.
+    case "$value" in
+        ''|*[!0-9a-zA-Z]*)
+            echo "Error: $arg_name must be an nginx time like '5s' or '500ms', got: $value" >&2
+            exit 1
+            ;;
+        *[0-9]ms|*[0-9]s|*[0-9]m|*[0-9]h|*[0-9]d)
+            ;;
+        *)
+            echo "Error: $arg_name must include a unit (e.g. '500ms', '5s', '1m'); got: $value" >&2
+            exit 1
+            ;;
+    esac
 }
 
 NEXT_ARG_IS=""
@@ -93,6 +119,8 @@ for arg in "$@"; do
     esac
 done
 
+validate_nginx_duration "$PROXY_CACHE_TTL" "PROXY_CACHE_TTL"
+
 case "$NEXT_ARG_IS" in
     "cert")
         echo "Error: --x509-server-cert-path requires a value" >&2
@@ -127,6 +155,7 @@ NGINX_CONF="/tmp/nginx.conf"
 
 sed -e "s|{{PROXY_CACHE_PATH_CONFIGURATION}}|$PROXY_CACHE_PATH_CONFIGURATION|g" \
     -e "s|{{PROXY_CACHE_MAX_SIZE_IN_MB}}|$PROXY_CACHE_MAX_SIZE_IN_MB|g" \
+    -e "s|{{PROXY_CACHE_TTL}}|$PROXY_CACHE_TTL|g" \
     -e "s|{{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}}|$PROXY_CACHE_CLEANUP_MAX_DURATION_MS|g" \
     -e "s|{{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}}|$PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL|g" \
     -e "s|{{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}}|$PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS|g" \
