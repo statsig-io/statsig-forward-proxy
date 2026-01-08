@@ -10,7 +10,6 @@ use super::{FullRequestContext, ResponseContext};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -63,9 +62,15 @@ pub async fn foreground_fetch(
 
             // Key eviction: Remove this lock from the cache after 30 seconds
             // This effectively rate limits requests to once per 30 seconds
+            let graceful_shutdown_token = GRACEFUL_SHUTDOWN_TOKEN.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                bdp.foreground_fetch_lock.remove(&key);
+                tokio::select! {
+                    _ = async {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        bdp.foreground_fetch_lock.remove(&key);
+                    } => {},
+                    _ = graceful_shutdown_token.cancelled() => {},
+                }
             });
         }
     }
@@ -99,29 +104,41 @@ impl BackgroundDataProvider {
         let graceful_shutdown_token = GRACEFUL_SHUTDOWN_TOKEN.clone();
         let clear_datastore_on_unauthorized = self.clear_datastore_on_unauthorized;
         let http_connection_pool_max_idle_per_host = self.http_connection_pool_max_idle_per_host;
-        rocket::tokio::task::spawn_blocking(move || {
-            Handle::current().block_on(async move {
-                loop {
-                    BackgroundDataProvider::impl_foreground_fetch(
-                        sdk_key_store.get_registered_store(),
-                        &shared_data_provider,
-                        batch_size,
-                        clear_datastore_on_unauthorized,
-                        http_connection_pool_max_idle_per_host,
-                    )
-                    .await;
-
-                    if tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(polling_interval_in_s)) => { false },
-                        _ = graceful_shutdown_token.cancelled() => {
-                            true
-                        },
-                    } {
-                        break;
-                    }
-                }
-            });
+        rocket::tokio::spawn(async move {
+            tokio::select! {
+                _ = BackgroundDataProvider::start_background_fetch_interval(
+                    &sdk_key_store,
+                    &shared_data_provider,
+                    batch_size,
+                    polling_interval_in_s,
+                    clear_datastore_on_unauthorized,
+                    http_connection_pool_max_idle_per_host,
+                ) => {},
+                _ = graceful_shutdown_token.cancelled() => {},
+            }
         });
+    }
+
+    async fn start_background_fetch_interval(
+        sdk_key_store: &Arc<SdkKeyStore>,
+        shared_data_provider: &Arc<HttpDataProvider>,
+        batch_size: u64,
+        polling_interval_in_s: u64,
+        clear_datastore_on_unauthorized: bool,
+        http_connection_pool_max_idle_per_host: usize,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_secs(polling_interval_in_s));
+        loop {
+            interval.tick().await;
+            BackgroundDataProvider::impl_foreground_fetch(
+                sdk_key_store.get_registered_store(),
+                shared_data_provider,
+                batch_size,
+                clear_datastore_on_unauthorized,
+                http_connection_pool_max_idle_per_host,
+            )
+            .await;
+        }
     }
 
     async fn impl_foreground_fetch(
