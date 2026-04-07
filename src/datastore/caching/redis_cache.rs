@@ -359,9 +359,12 @@ impl RedisCache {
                                     .ok();
                             }
 
-                            if self.check_lcut && query_result.3.is_some() {
-                                let should_update =
-                                    query_result.3.expect("exists").parse().unwrap_or(0) < lcut;
+                            if self.check_lcut {
+                                let should_update = query_result
+                                    .3
+                                    .as_deref()
+                                    .and_then(|existing_lcut| existing_lcut.parse::<u64>().ok())
+                                    .is_none_or(|existing_lcut| existing_lcut < lcut);
                                 is_leader && should_update
                             } else {
                                 is_leader
@@ -424,6 +427,10 @@ impl RedisCache {
                                 }
                             }
                             CompressionEncoder::StatsigBrotli => data.data.to_vec(),
+                            CompressionEncoder::Deflate
+                            | CompressionEncoder::Compress
+                            | CompressionEncoder::Identity
+                            | CompressionEncoder::Zstd => data.data.to_vec(),
                         };
                         // We currently only support writing data to redis as plain_text
                         match pipe

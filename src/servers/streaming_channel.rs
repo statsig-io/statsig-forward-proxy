@@ -16,10 +16,13 @@ use crate::observers::OperationType;
 use crate::observers::{ProxyEvent, ProxyEventType};
 use crate::servers::authorized_request_context::AuthorizedRequestContext;
 
+type StreamPayload = Option<(Arc<ResponsePayload>, u64)>;
+type StreamSender = Arc<RwLock<Sender<StreamPayload>>>;
+
 pub struct StreamingChannel {
     request_context: Arc<AuthorizedRequestContext>,
     last_updated: Arc<RwLock<u64>>,
-    pub sender: Arc<RwLock<Sender<Option<(Arc<ResponsePayload>, u64)>>>>,
+    pub sender: StreamSender,
 }
 
 impl StreamingChannel {

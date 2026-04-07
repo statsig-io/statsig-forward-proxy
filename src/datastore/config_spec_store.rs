@@ -75,18 +75,22 @@ impl HttpDataProviderObserverTrait for ConfigSpecStore {
                     .entry(request_context.authorized_request_context.clone())
                     .and_modify(|entry| {
                         *entry = new_data.clone();
-                        ProxyEventObserver::publish_event(
-                            ProxyEvent::new_with_rc(
-                                ProxyEventType::UpdateConfigSpecStorePropagationDelayMs,
-                                &request_context.authorized_request_context,
-                            )
-                            .with_lcut(response_context.lcut)
-                            .with_stat(EventStat {
-                                operation_type: OperationType::Distribution,
-                                value: Utc::now().timestamp_millis()
-                                    - (response_context.lcut as i64),
-                            }),
-                        );
+                        // Cold-start/full-sync fetches use sinceTime=0, so `now - lcut` measures
+                        // config age, not propagation delay. Only emit this for incremental updates.
+                        if response_context.request_since_time > 0 {
+                            ProxyEventObserver::publish_event(
+                                ProxyEvent::new_with_rc(
+                                    ProxyEventType::UpdateConfigSpecStorePropagationDelayMs,
+                                    &request_context.authorized_request_context,
+                                )
+                                .with_lcut(response_context.lcut)
+                                .with_stat(EventStat {
+                                    operation_type: OperationType::Distribution,
+                                    value: Utc::now().timestamp_millis()
+                                        - (response_context.lcut as i64),
+                                }),
+                            );
+                        }
                     })
                     .or_insert(new_data);
             }
@@ -186,6 +190,8 @@ pub fn shadow_fetch_json_config_spec(
             rc_clone.path.clone(),
             vec![CompressionEncoder::Gzip], // decompression is handled before committing to DataStore
             false,                          // Fetch json format only
+            false,                          // Deltas are irrelevant for shadow JSON fetches
+            None,                           // file_id only used by single id list file requests
         );
 
         let _ = spec_store_clone

@@ -67,7 +67,7 @@ pub struct StatsigMetadata {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PossiblyLogEvent {
-    ValidLogEvent(LogEvent),
+    ValidLogEvent(Box<LogEvent>),
     InvalidLogEvent(HashMap<String, Value>),
 }
 #[skip_serializing_none]

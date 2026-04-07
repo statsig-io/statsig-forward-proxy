@@ -136,10 +136,46 @@ affinity: {}
 sfp:
   # Specify the environment variables here to load them into this chart's ConfigMap directly.
   # These environment variables should match the ones documented by your application.
+  # Avoid using this for secret values. `SFP_STARTUP_WARMUP_KEYS_JSON` includes SDK keys, so
+  # prefer `sfp.secrets` or `sfp.envFromSecret` for production deployments.
   environment: {}
     # STATSIG_ENDPOINT: "https://api.statsigcdn.com"
+    # For local/dev only:
+    # SFP_STARTUP_WARMUP_KEYS_JSON: >-
+    #   [{"sdk_key":"secret-client-key","path":"/v1/download_config_specs","encodings":["gzip"]}]
 
-  # Container command-line arguments. 
+  # Container command-line arguments.
+  # Example outbound fetch tuning:
+  # args:
+  #   - http
+  #   - disabled
+  #   - --http-request-timeout-in-s
+  #   - "45"
+  #   - --http-read-timeout-in-s
+  #   - "20"
+  #   - --http-connect-timeout-in-s
+  #   - "5"
+  #   - --http-connection-pool-max-idle-per-host
+  #   - "25"
+  #
+  # Example background polling / request-backoff tuning:
+  # args:
+  #   - http
+  #   - disabled
+  #   - --polling-interval-in-s
+  #   - "15"
+  #   - --max-in-flight
+  #   - "16"
+  #   - --background-poll-item-spacing-ms
+  #   - "25"
+  #   - --clear-datastore-on-unauthorized
+  #   - --id-list-file-refresh-observer-enabled
+  #
+  # `--polling-interval-in-s` sets the primary loop cadence and initial
+  # request-backoff delay. `--max-in-flight` caps background refresh
+  # concurrency and also applies to startup warmup fetches.
+  # `--id-list-file-refresh-observer-enabled` enables asynchronous refreshes
+  # for download_id_list_file payloads referenced by get_id_lists manifests.
   args: ["http", "disabled"]
 
   # More complex `valueFrom` style variable configurations for the deployment
@@ -155,6 +191,9 @@ sfp:
     # - envName: STATSIG_SERVER_SDK_KEY
     #   secretName: statsig-server-sdk-key
     #   secretKey: statsig-server-sdk-key
+    # - envName: SFP_STARTUP_WARMUP_KEYS_JSON
+    #   secretName: sfp-startup-warmup
+    #   secretKey: SFP_STARTUP_WARMUP_KEYS_JSON
 
   # Use k8s secrets to set envFrom. This differs from `secrets` as this dynamically sets the environment variables from
   # the key value pairs in the k8s secret.

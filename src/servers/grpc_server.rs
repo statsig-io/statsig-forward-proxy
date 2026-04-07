@@ -112,6 +112,8 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             StatsigForwardProxyServerImpl::get_normalized_path_from_request(&request),
             vec![CompressionEncoder::PlainText],
             false,
+            false,
+            None,
         );
         let result = self
             .config_spec_store
@@ -158,6 +160,8 @@ impl StatsigForwardProxy for StatsigForwardProxyServerImpl {
             normalized_path,
             vec![CompressionEncoder::PlainText],
             false,
+            false,
+            None,
         );
 
         let (tx, rx) = mpsc::channel(1);

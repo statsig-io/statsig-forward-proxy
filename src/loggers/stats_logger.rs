@@ -24,6 +24,11 @@ use opentelemetry_otlp::{ExporterBuildError, MetricExporter, Protocol, WithExpor
 
 use smallvec::SmallVec;
 
+type MetricTags = Arc<SmallVec<[String; 4]>>;
+type CachedTags = (MetricTags, Instant);
+type TagCache = FxHashMap<ProxyEvent, CachedTags>;
+type IncrementKey = (String, MetricTags);
+
 #[derive(Deserialize, Clone)]
 pub struct EnvConfig {
     pub datadog_max_batch_time_ms: Option<u64>,
@@ -43,8 +48,7 @@ pub struct EnvConfig {
 
 lazy_static! {
     static ref CONFIG: EnvConfig = envy::from_env().expect("Malformed config");
-    static ref TAG_CACHE: Mutex<FxHashMap<ProxyEvent, (Arc<SmallVec<[String; 4]>>, Instant)>> =
-        Mutex::new(FxHashMap::default());
+    static ref TAG_CACHE: Mutex<TagCache> = Mutex::new(FxHashMap::default());
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,7 +114,7 @@ struct Operation {
     operation_type: OperationType,
     counter_name: String,
     value: i64,
-    tags: Arc<SmallVec<[String; 4]>>,
+    tags: MetricTags,
 }
 
 pub struct StatsLogger {
@@ -170,7 +174,7 @@ impl StatsLogger {
         StatsLogger { sender: tx }
     }
 
-    fn get_or_create_tags(event: &ProxyEvent) -> Arc<SmallVec<[String; 4]>> {
+    fn get_or_create_tags(event: &ProxyEvent) -> MetricTags {
         TAG_CACHE
             .lock()
             .entry(event.clone())
@@ -182,17 +186,38 @@ impl StatsLogger {
                 if let Some(path) = &event.get_path() {
                     tags.push(path_tag(path));
                 }
+                if event.should_tag_id_list_file_id() {
+                    if let Some(file_id) = event.get_id_list_file_id() {
+                        tags.push(format_tag("file_id", file_id));
+                    }
+                }
                 if let Some(lcut) = event.lcut {
                     tags.push(lcut_tag(lcut));
                 }
                 if let Some(code) = event.status_code {
                     tags.push(status_code_tag(code));
                 }
-                if let Some(encodings) = event.get_accept_encodings() {
-                    tags.push(format_tag("accept-encoding", &encodings));
+                // Use the accessor so we keep the request_context fallback for events
+                // that don't explicitly set `accept_encoding` (e.g. HttpDataProvider).
+                if let Some(accept_encoding) = event.get_accept_encodings() {
+                    tags.push(format_tag("accept-encoding", &accept_encoding));
                 }
                 if let Some(enc) = &event.response_encoding {
-                    tags.push(format_tag("content-encoding", enc.as_str()));
+                    // Datadog splits comma-separated tags, so normalize to '+'.
+                    let normalized = normalize_content_encoding(enc.as_str());
+                    tags.push(format_tag("content-encoding", &normalized));
+                }
+                if let Some(sdk_type) = &event.sdk_type {
+                    tags.push(format_tag("sdk_type", sdk_type));
+                }
+                if let Some(sdk_version) = &event.sdk_version {
+                    tags.push(format_tag("sdk_version", sdk_version));
+                }
+                if let Some(service) = &event.service {
+                    tags.push(format_tag("client_service", service));
+                }
+                if let Some(payload_type) = &event.response_payload_type {
+                    tags.push(format_tag("response_payload_type", payload_type));
                 }
                 (Arc::new(tags), Instant::now())
             })
@@ -264,6 +289,20 @@ fn format_tag(tag: &str, value: &str) -> String {
     s.push(':');
     s.push_str(value);
     s
+}
+
+fn normalize_content_encoding(value: &str) -> String {
+    let normalized = value
+        .split(',')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    if normalized.is_empty() {
+        value.to_string()
+    } else {
+        normalized.join("+")
+    }
 }
 
 fn operation_suffix(operation_type: &OperationType) -> &'static str {
@@ -370,10 +409,7 @@ mod batching {
         }
     }
 
-    async fn flush(
-        batch: Vec<Operation>,
-        incr_op_map: FxHashMap<(String, Arc<SmallVec<[String; 4]>>), i64>,
-    ) {
+    async fn flush(batch: Vec<Operation>, incr_op_map: FxHashMap<IncrementKey, i64>) {
         for ((counter_name, tags), incr_amount) in incr_op_map {
             send(Operation {
                 operation_type: OperationType::IncrByValue,
@@ -390,8 +426,7 @@ mod batching {
 
     pub(crate) async fn process_operations(mut rx: Receiver<Operation>) {
         let mut batch = Vec::with_capacity(CONFIG.datadog_max_batch_event_count.unwrap_or(3000));
-        let mut incr_op_map: FxHashMap<(String, Arc<SmallVec<[String; 4]>>), i64> =
-            FxHashMap::default();
+        let mut incr_op_map: FxHashMap<IncrementKey, i64> = FxHashMap::default();
         let mut last_updated = Instant::now();
         let max_batch_time =
             Duration::from_millis(CONFIG.datadog_max_batch_time_ms.unwrap_or(10000));
@@ -668,7 +703,7 @@ impl OTLPLogger {
         };
     }
 
-    fn convert_tags(tags: Arc<SmallVec<[String; 4]>>) -> Vec<KeyValue> {
+    fn convert_tags(tags: MetricTags) -> Vec<KeyValue> {
         tags.iter()
             .filter_map(|t| {
                 if let Some(idx) = memchr(b':', t.as_bytes()) {
@@ -679,5 +714,224 @@ impl OTLPLogger {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StatsLogger, TAG_CACHE};
+    use crate::observers::{ProxyEvent, ProxyEventType};
+    use crate::servers::authorized_request_context::AuthorizedRequestContext;
+    use crate::servers::normalized_path::NormalizedPath;
+    use crate::utils::compress_encoder::CompressionEncoder;
+    use std::sync::Arc;
+
+    #[test]
+    fn stats_logger_includes_new_metric_tags() {
+        TAG_CACHE.lock().clear();
+
+        let event = ProxyEvent::new(ProxyEventType::HttpServerRequestSuccess)
+            .with_status_code(200)
+            .with_accept_encoding("gzip+br".to_string())
+            .with_sdk_type("js-client".to_string())
+            .with_sdk_version("1.2.3-beta.1".to_string())
+            .with_service("checkout".to_string())
+            .with_response_payload_type("no_update".to_string());
+
+        let tags = StatsLogger::get_or_create_tags(&event);
+        assert!(tags.iter().any(|tag| tag == "status_code:200"));
+        assert!(
+            tags.iter().any(|tag| tag == "accept-encoding:gzip+br"),
+            "{tags:?}"
+        );
+        assert!(tags.iter().any(|tag| tag == "sdk_type:js-client"));
+        assert!(tags.iter().any(|tag| tag == "sdk_version:1.2.3-beta.1"));
+        assert!(tags.iter().any(|tag| tag == "client_service:checkout"));
+        assert!(
+            tags.iter()
+                .any(|tag| tag == "response_payload_type:no_update"),
+            "{tags:?}"
+        );
+    }
+
+    #[test]
+    fn stats_logger_falls_back_to_request_context_accept_encoding() {
+        TAG_CACHE.lock().clear();
+
+        let request_context = Arc::new(AuthorizedRequestContext::new(
+            "secret-key".to_string(),
+            NormalizedPath::V1DownloadConfigSpecs,
+            vec![CompressionEncoder::PlainText, CompressionEncoder::Gzip],
+        ));
+
+        // Mirror HttpDataProvider events: no explicit `accept_encoding` set on the event.
+        let event =
+            ProxyEvent::new_with_rc(ProxyEventType::HttpDataProviderGotData, &request_context)
+                .with_status_code(200);
+
+        let tags = StatsLogger::get_or_create_tags(&event);
+        assert!(
+            tags.iter().any(|tag| tag == "accept-encoding:gzip"),
+            "{tags:?}"
+        );
+    }
+
+    #[test]
+    fn stats_logger_does_not_tag_http_data_provider_id_list_metrics_with_file_id() {
+        TAG_CACHE.lock().clear();
+
+        let request_context = Arc::new(
+            AuthorizedRequestContext::new(
+                "secret-key".to_string(),
+                NormalizedPath::V1DownloadIdListFile,
+                vec![CompressionEncoder::PlainText],
+            )
+            .with_id_list_request(Some("file_123".to_string()), Some(0), Some(4096)),
+        );
+        let event =
+            ProxyEvent::new_with_rc(ProxyEventType::HttpDataProviderGotData, &request_context)
+                .with_status_code(200);
+
+        let tags = StatsLogger::get_or_create_tags(&event);
+        assert!(
+            !tags.iter().any(|tag| tag == "file_id:file_123"),
+            "{tags:?}"
+        );
+        assert!(
+            !tags.iter().any(|tag| tag.starts_with("id_list_file_size:")),
+            "file size should be emitted as a metric value, not a tag: {tags:?}"
+        );
+    }
+
+    #[test]
+    fn stats_logger_does_not_tag_front_door_id_list_requests_with_file_id() {
+        TAG_CACHE.lock().clear();
+
+        let request_context = Arc::new(
+            AuthorizedRequestContext::new(
+                "secret-key".to_string(),
+                NormalizedPath::V1DownloadIdListFile,
+                vec![CompressionEncoder::PlainText],
+            )
+            .with_id_list_request(Some("file_123".to_string()), Some(0), Some(4096)),
+        );
+        let event =
+            ProxyEvent::new_with_rc(ProxyEventType::HttpServerRequestSuccess, &request_context)
+                .with_status_code(200);
+
+        let tags = StatsLogger::get_or_create_tags(&event);
+        assert!(
+            !tags.iter().any(|tag| tag == "file_id:file_123"),
+            "{tags:?}"
+        );
+    }
+
+    #[test]
+    fn stats_logger_tags_download_id_list_file_size_metric_with_file_id() {
+        TAG_CACHE.lock().clear();
+
+        let request_context = Arc::new(
+            AuthorizedRequestContext::new(
+                "secret-key".to_string(),
+                NormalizedPath::V1DownloadIdListFile,
+                vec![CompressionEncoder::PlainText],
+            )
+            .with_id_list_request(Some("file_123".to_string()), Some(0), Some(4096)),
+        );
+        let event = ProxyEvent::new_with_rc(
+            ProxyEventType::DownloadIdListFileSizeBytes,
+            &request_context,
+        );
+
+        let tags = StatsLogger::get_or_create_tags(&event);
+        assert!(tags.iter().any(|tag| tag == "file_id:file_123"), "{tags:?}");
+    }
+
+    #[test]
+    fn stats_logger_normalizes_content_encoding_with_multiple_values() {
+        TAG_CACHE.lock().clear();
+
+        let event = ProxyEvent::new(ProxyEventType::HttpServerRequestSuccess)
+            .with_status_code(200)
+            .with_response_encoding("gzip, br, plain_text".to_string());
+
+        let tags = StatsLogger::get_or_create_tags(&event);
+        assert!(
+            tags.iter()
+                .any(|tag| tag == "content-encoding:gzip+br+plain_text"),
+            "{tags:?}"
+        );
+    }
+
+    #[test]
+    fn stats_logger_cache_handles_multi_tag_events() {
+        TAG_CACHE.lock().clear();
+
+        let base_event = ProxyEvent::new(ProxyEventType::HttpServerRequestSuccess)
+            .with_status_code(200)
+            .with_accept_encoding("gzip".to_string())
+            .with_response_encoding("gzip".to_string())
+            .with_sdk_type("js-client".to_string())
+            .with_sdk_version("1.2.3".to_string())
+            .with_service("checkout".to_string())
+            .with_response_payload_type("full".to_string());
+
+        let same_event = base_event.clone();
+        let changed_version_event = base_event.clone().with_sdk_version("1.2.4".to_string());
+
+        let base_tags_first = StatsLogger::get_or_create_tags(&base_event);
+        let base_tags_second = StatsLogger::get_or_create_tags(&same_event);
+        let changed_version_tags = StatsLogger::get_or_create_tags(&changed_version_event);
+
+        assert!(
+            Arc::ptr_eq(&base_tags_first, &base_tags_second),
+            "identical multi-tag events should reuse cache entry"
+        );
+        assert!(
+            !Arc::ptr_eq(&base_tags_first, &changed_version_tags),
+            "changing one tag dimension should create a distinct cache entry"
+        );
+
+        assert!(base_tags_first.iter().any(|tag| tag == "status_code:200"));
+        assert!(
+            base_tags_first
+                .iter()
+                .any(|tag| tag == "accept-encoding:gzip"),
+            "{base_tags_first:?}"
+        );
+        assert!(
+            base_tags_first
+                .iter()
+                .any(|tag| tag == "content-encoding:gzip"),
+            "{base_tags_first:?}"
+        );
+        assert!(
+            base_tags_first
+                .iter()
+                .any(|tag| tag == "sdk_type:js-client"),
+            "{base_tags_first:?}"
+        );
+        assert!(
+            base_tags_first.iter().any(|tag| tag == "sdk_version:1.2.3"),
+            "{base_tags_first:?}"
+        );
+        assert!(
+            base_tags_first
+                .iter()
+                .any(|tag| tag == "client_service:checkout"),
+            "{base_tags_first:?}"
+        );
+        assert!(
+            base_tags_first
+                .iter()
+                .any(|tag| tag == "response_payload_type:full"),
+            "{base_tags_first:?}"
+        );
+        assert!(
+            changed_version_tags
+                .iter()
+                .any(|tag| tag == "sdk_version:1.2.4"),
+            "{changed_version_tags:?}"
+        );
     }
 }

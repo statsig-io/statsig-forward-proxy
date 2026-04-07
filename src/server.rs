@@ -4,13 +4,22 @@ use clap::ValueEnum;
 
 use datastore::caching::disabled_cache;
 use datastore::config_spec_store::ConfigSpecStore;
+use datastore::data_providers::dcs_blob_url_generator::DcsBlobUrlGenerator;
 use datastore::data_providers::request_builder::CachedRequestBuilders;
+use datastore::data_providers::request_builder::DcsBlobConfig;
 use datastore::data_providers::request_builder::DcsRequestBuilder;
+use datastore::data_providers::request_builder::IdListFileRequestBuilder;
 use datastore::data_providers::request_builder::IdlistRequestBuilder;
+use datastore::data_providers::HttpClientConfig;
+use datastore::deltas_store::DeltasStore;
+use datastore::id_list_file_refresh_observer::IdListFileRefreshObserver;
+use datastore::id_list_file_store::IdListFileStore;
 use datastore::log_event_store::LogEventStore;
 use datastore::{
     caching::redis_cache,
-    data_providers::{background_data_provider, http_data_provider},
+    data_providers::{
+        background_data_provider, http_data_provider, startup_warmup_parser, OUTBOUND_USER_AGENT,
+    },
     sdk_key_store,
 };
 use futures::join;
@@ -73,8 +82,12 @@ pub struct Cli {
     maximum_concurrent_sdk_keys: u16,
     #[clap(short, long, default_value = "10")]
     polling_interval_in_s: u64,
-    #[clap(short, long, default_value = "64")]
-    update_batch_size: u64,
+    #[clap(short = 'u', long, alias = "update-batch-size", default_value = "64")]
+    max_in_flight: u64,
+    /// Adds a minimum delay between background request launches to reduce
+    /// synchronized bursts across pods. `0` disables this pacing.
+    #[clap(long, default_value = "0")]
+    background_poll_item_spacing_ms: u64,
     #[clap(long, default_value = "5")]
     redis_connection_timeout_in_s: u64,
     #[clap(short, long, default_value = "70")]
@@ -114,14 +127,48 @@ pub struct Cli {
     enforce_mtls: bool,
     #[clap(long, default_value = "10")]
     http_connection_pool_max_idle_per_host: usize,
+    #[clap(long, default_value = "30")]
+    http_connection_pool_idle_timeout_in_s: u64,
+    #[clap(long, default_value = "30")]
+    http_request_timeout_in_s: u64,
+    #[clap(long, default_value = "10")]
+    http_read_timeout_in_s: u64,
+    #[clap(long, default_value = "10")]
+    http_connect_timeout_in_s: u64,
+    #[clap(long, action)]
+    deltas_background_loop_enabled: bool,
+    #[clap(long, action)]
+    id_list_file_refresh_observer_enabled: bool,
+    #[clap(long, default_value = None)]
+    deltas_background_loop_sleep_time_in_s: Option<u64>,
+    #[clap(long, default_value = None)]
+    deltas_num_responses_to_persist: Option<usize>,
+}
+
+impl Cli {
+    fn http_client_config(&self) -> HttpClientConfig {
+        HttpClientConfig::new(
+            self.http_request_timeout_in_s,
+            self.http_read_timeout_in_s,
+            self.http_connect_timeout_in_s,
+            self.http_connection_pool_idle_timeout_in_s,
+            self.http_connection_pool_max_idle_per_host,
+        )
+    }
 }
 
 #[derive(Deserialize, Debug)]
 struct ConfigurationAndOverrides {
     statsig_endpoint: Option<String>,
+    statsig_endpoint_deltas: Option<String>,
+    statsig_endpoint_download_id_list_file: Option<String>,
+    enable_blob_storage_for_download_config_specs: Option<bool>,
+    dcs_blob_storage_connection_string: Option<String>,
+    dcs_blob_storage_company_id: Option<String>,
     statsig_server_sdk_key: Option<String>,
     log_event_statsig_endpoint: Option<String>,
     log_event_dedupe_cache_limit: Option<usize>,
+    tokio_worker_threads_background: Option<usize>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -135,6 +182,30 @@ enum TransportMode {
 enum CacheMode {
     Disabled,
     Redis,
+}
+
+struct BackgroundRuntimeGuard(Option<tokio::runtime::Runtime>);
+
+impl BackgroundRuntimeGuard {
+    fn new(runtime: tokio::runtime::Runtime) -> Self {
+        Self(Some(runtime))
+    }
+
+    fn handle(&self) -> tokio::runtime::Handle {
+        self.0
+            .as_ref()
+            .expect("background runtime must exist while guard is alive")
+            .handle()
+            .clone()
+    }
+}
+
+impl Drop for BackgroundRuntimeGuard {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 async fn try_initialize_statsig_sdk_and_profiling(cli: &Cli, config: &ConfigurationAndOverrides) {
@@ -168,6 +239,7 @@ async fn create_config_spec_store(
     shared_cache: &Arc<dyn HttpDataProviderObserverTrait + Send + Sync>,
     sdk_key_store: &Arc<sdk_key_store::SdkKeyStore>,
 ) -> Arc<ConfigSpecStore> {
+    let dcs_blob_config = create_dcs_blob_config(overrides);
     let dcs_request_builder = Arc::new(DcsRequestBuilder::new(
         overrides
             .statsig_endpoint
@@ -175,6 +247,7 @@ async fn create_config_spec_store(
             .map_or("https://api.statsigcdn.com".to_string(), |s| s.to_string()),
         Arc::clone(&config_spec_observer),
         Arc::clone(shared_cache),
+        dcs_blob_config,
     ));
     CachedRequestBuilders::add_request_builder(
         NormalizedPath::V1DownloadConfigSpecs,
@@ -219,12 +292,17 @@ async fn create_log_event_store(
 
 async fn create_id_list_store(
     _cli: &Cli,
+    overrides: &ConfigurationAndOverrides,
     background_data_provider: Arc<background_data_provider::BackgroundDataProvider>,
     idlist_observer: Arc<HttpDataProviderObserver>,
     shared_cache: &Arc<dyn HttpDataProviderObserverTrait + Send + Sync>,
     sdk_key_store: &Arc<sdk_key_store::SdkKeyStore>,
 ) -> Arc<GetIdListStore> {
     let idlist_request_builder = Arc::new(IdlistRequestBuilder::new(
+        overrides
+            .statsig_endpoint
+            .as_ref()
+            .map_or("https://api.statsigcdn.com".to_string(), |s| s.to_string()),
         Arc::clone(&idlist_observer),
         Arc::clone(shared_cache),
     ));
@@ -241,6 +319,131 @@ async fn create_id_list_store(
     idlist_observer.add_observer(Arc::clone(shared_cache)).await;
 
     id_list_store
+}
+
+async fn create_id_list_file_store(
+    overrides: &ConfigurationAndOverrides,
+    background_data_provider: Arc<background_data_provider::BackgroundDataProvider>,
+) -> Arc<IdListFileStore> {
+    let id_list_file_observer = Arc::new(HttpDataProviderObserver::new());
+    let id_list_file_request_builder = Arc::new(IdListFileRequestBuilder::new(
+        resolve_download_id_list_file_base_url(overrides),
+        Arc::clone(&id_list_file_observer),
+        Arc::new(disabled_cache::DisabledCache::default()),
+    ));
+    CachedRequestBuilders::add_request_builder(
+        NormalizedPath::V1DownloadIdListFile,
+        id_list_file_request_builder,
+    );
+
+    let id_list_file_store = Arc::new(IdListFileStore::new(background_data_provider));
+    id_list_file_observer
+        .add_observer(id_list_file_store.clone())
+        .await;
+
+    id_list_file_store
+}
+
+fn resolve_download_id_list_file_base_url(overrides: &ConfigurationAndOverrides) -> String {
+    overrides
+        .statsig_endpoint_download_id_list_file
+        .as_ref()
+        .or(overrides.statsig_endpoint.as_ref())
+        .map_or("https://api.statsigcdn.com".to_string(), |s| s.to_string())
+}
+
+fn create_dcs_blob_config(overrides: &ConfigurationAndOverrides) -> Option<DcsBlobConfig> {
+    if !overrides
+        .enable_blob_storage_for_download_config_specs
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let connection_string = overrides.dcs_blob_storage_connection_string.as_ref()?;
+    let company_id = overrides.dcs_blob_storage_company_id.as_ref()?;
+    if company_id.trim().is_empty() {
+        eprintln!("Failed to initialize DCS blob URL generator: company id is empty");
+        return None;
+    }
+    match DcsBlobUrlGenerator::from_connection_string(connection_string) {
+        Ok(generator) => Some(DcsBlobConfig {
+            url_generator: Arc::new(generator),
+            company_id: company_id.clone(),
+        }),
+        Err(error) => {
+            eprintln!("Failed to initialize DCS blob URL generator: {error}");
+            None
+        }
+    }
+}
+
+async fn maybe_create_deltas_store(
+    cli: &Cli,
+    overrides: &ConfigurationAndOverrides,
+    config_spec_observer: Arc<HttpDataProviderObserver>,
+    http_client_config: HttpClientConfig,
+) -> Option<(
+    Arc<DeltasStore>,
+    Arc<background_data_provider::BackgroundDataProvider>,
+)> {
+    if !cli.deltas_background_loop_enabled {
+        return None;
+    }
+
+    let deltas_polling_interval_in_s = cli
+        .deltas_background_loop_sleep_time_in_s
+        .unwrap_or(cli.polling_interval_in_s);
+    let deltas_num_responses_to_persist = cli.deltas_num_responses_to_persist.unwrap_or(20);
+    let deltas_sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
+    let deltas_http_provider = Arc::new(http_data_provider::HttpDataProvider {});
+    let deltas_background_data_provider =
+        Arc::new(background_data_provider::BackgroundDataProvider::new(
+            deltas_http_provider,
+            deltas_polling_interval_in_s,
+            Arc::clone(&deltas_sdk_key_store),
+            cli.clear_datastore_on_unauthorized,
+            http_client_config,
+            background_data_provider::BackgroundPollDispatchConfig::new(
+                cli.max_in_flight,
+                cli.background_poll_item_spacing_ms,
+            ),
+        ));
+
+    let deltas_observer = Arc::new(HttpDataProviderObserver::new());
+    let disabled_cache: Arc<dyn HttpDataProviderObserverTrait + Send + Sync> =
+        Arc::new(disabled_cache::DisabledCache::default());
+    let deltas_request_builder = Arc::new(DcsRequestBuilder::new(
+        overrides
+            .statsig_endpoint_deltas
+            .as_ref()
+            .map_or("https://api.statsigcdn.com".to_string(), |s| s.to_string()),
+        Arc::clone(&deltas_observer),
+        disabled_cache,
+        None,
+    ));
+    CachedRequestBuilders::add_request_builder(
+        NormalizedPath::V2DownloadConfigSpecsDeltas,
+        deltas_request_builder,
+    );
+
+    let deltas_store = Arc::new(DeltasStore::new(
+        Arc::clone(&deltas_sdk_key_store),
+        Arc::clone(&deltas_background_data_provider),
+        deltas_num_responses_to_persist,
+    ));
+    deltas_observer
+        .add_observer(
+            Arc::clone(&deltas_store) as Arc<dyn HttpDataProviderObserverTrait + Send + Sync>
+        )
+        .await;
+    config_spec_observer
+        .add_observer(
+            Arc::clone(&deltas_store) as Arc<dyn HttpDataProviderObserverTrait + Send + Sync>
+        )
+        .await;
+
+    Some((deltas_store, deltas_background_data_provider))
 }
 
 #[rocket::main]
@@ -271,16 +474,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProxyEventObserver::add_observer(debug_logger).await;
     }
 
+    println!("[SFP] Parsing startup warm-up keys...");
+    let warmup_store_items = match startup_warmup_parser::load_startup_warmup_keys_from_env() {
+        Ok(Some(startup_warmup_parse_result)) => {
+            let valid_count = startup_warmup_parse_result.store_items.len();
+            println!(
+                "[SFP] Startup warm-up key summary: configured={}, valid={}, invalid={}",
+                startup_warmup_parse_result.configured_count,
+                valid_count,
+                startup_warmup_parse_result.invalid_count,
+            );
+            Some(startup_warmup_parse_result.store_items)
+        }
+        Ok(None) => {
+            println!("[SFP] No startup warm-up keys configured.");
+            None
+        }
+        Err(err) => {
+            eprintln!(
+                "[SFP] Failed to parse startup warm-up keys from {}: {err}",
+                startup_warmup_parser::STARTUP_WARMUP_KEYS_ENV
+            );
+            None
+        }
+    };
+
     println!("[SFP] Initializing data providers...");
     let shared_http_data_provider = Arc::new(http_data_provider::HttpDataProvider {});
     let sdk_key_store = Arc::new(sdk_key_store::SdkKeyStore::new());
+    let background_poll_dispatch_config =
+        background_data_provider::BackgroundPollDispatchConfig::new(
+            cli.max_in_flight,
+            cli.background_poll_item_spacing_ms,
+        );
+    let http_client_config = cli.http_client_config();
     let background_data_provider = Arc::new(background_data_provider::BackgroundDataProvider::new(
         shared_http_data_provider,
         cli.polling_interval_in_s,
-        cli.update_batch_size,
         Arc::clone(&sdk_key_store),
         cli.clear_datastore_on_unauthorized,
-        cli.http_connection_pool_max_idle_per_host,
+        http_client_config,
+        background_poll_dispatch_config,
     ));
     let cache_uuid = Uuid::new_v4().to_string();
 
@@ -326,18 +560,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let idlist_observer = Arc::new(HttpDataProviderObserver::new());
     let id_list_store = create_id_list_store(
         &cli,
+        &overrides,
         Arc::clone(&background_data_provider),
         Arc::clone(&idlist_observer),
         &idlist_redis_cache,
         &sdk_key_store,
     )
     .await;
+    let id_list_file_store =
+        create_id_list_file_store(&overrides, Arc::clone(&background_data_provider)).await;
+    if cli.id_list_file_refresh_observer_enabled {
+        println!("[SFP] Enabling id-list file refresh observer...");
+        idlist_observer
+            .add_observer(Arc::new(IdListFileRefreshObserver::new(Arc::clone(
+                &id_list_file_store,
+            ))))
+            .await;
+    }
+    let deltas_runtime = maybe_create_deltas_store(
+        &cli,
+        &overrides,
+        Arc::clone(&config_spec_observer),
+        http_client_config,
+    )
+    .await;
+    let deltas_store = deltas_runtime.as_ref().map(|(store, _)| Arc::clone(store));
+    let default_background_worker_threads = std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(1);
+    let background_worker_threads = overrides
+        .tokio_worker_threads_background
+        .unwrap_or(default_background_worker_threads);
+    if background_worker_threads == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TOKIO_WORKER_THREADS_BACKGROUND must be greater than 0",
+        )
+        .into());
+    }
+    println!(
+        "[SFP] Starting dedicated background runtime with {background_worker_threads} worker thread(s) (TOKIO_WORKER_THREADS_BACKGROUND)..."
+    );
+    let background_runtime = BackgroundRuntimeGuard::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(background_worker_threads)
+            .enable_all()
+            .thread_name("sfp-bg")
+            .build()?,
+    );
+    let background_runtime_handle = background_runtime.handle();
 
     println!("[SFP] Starting background thread...");
-    background_data_provider.start_background_thread().await;
+    background_data_provider
+        .start_background_thread(warmup_store_items, &background_runtime_handle)
+        .await;
+    if let Some((_, deltas_background_data_provider)) = &deltas_runtime {
+        deltas_background_data_provider
+            .start_background_thread(None, &background_runtime_handle)
+            .await;
+    }
     let rc_cache = Arc::new(AuthorizedRequestContextCache::new());
     // Default buffer size is 20000 messages
     let http_client = reqwest::Client::builder()
+        .user_agent(OUTBOUND_USER_AGENT)
         .timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(10))
@@ -362,11 +647,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TransportMode::Http => {
             servers::http_server::HttpServer::start_server(
                 &cli,
-                config_spec_store,
-                log_event_store,
-                id_list_store,
-                rc_cache,
-                sdk_key_store.clone(),
+                servers::http_server::HttpServerDependencies {
+                    config_spec_store,
+                    deltas_store: deltas_store.clone(),
+                    log_event_store,
+                    id_list_store,
+                    id_list_file_store,
+                    rc_cache,
+                    sdk_key_store: sdk_key_store.clone(),
+                },
             )
             .await?
         }
@@ -379,11 +668,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let http_server = servers::http_server::HttpServer::start_server(
                 &cli,
-                config_spec_store,
-                log_event_store,
-                id_list_store,
-                rc_cache,
-                sdk_key_store.clone(),
+                servers::http_server::HttpServerDependencies {
+                    config_spec_store,
+                    deltas_store: deltas_store.clone(),
+                    log_event_store,
+                    id_list_store,
+                    id_list_file_store,
+                    rc_cache,
+                    sdk_key_store: sdk_key_store.clone(),
+                },
             );
             join!(async { grpc_server.await.ok() }, async {
                 http_server.await.ok()
@@ -395,4 +688,125 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     GRACEFUL_SHUTDOWN_TOKEN.cancel();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_overrides(
+        statsig_endpoint: Option<&str>,
+        statsig_endpoint_download_id_list_file: Option<&str>,
+    ) -> ConfigurationAndOverrides {
+        ConfigurationAndOverrides {
+            statsig_endpoint: statsig_endpoint.map(str::to_string),
+            statsig_endpoint_deltas: None,
+            statsig_endpoint_download_id_list_file: statsig_endpoint_download_id_list_file
+                .map(str::to_string),
+            enable_blob_storage_for_download_config_specs: None,
+            dcs_blob_storage_connection_string: None,
+            dcs_blob_storage_company_id: None,
+            statsig_server_sdk_key: None,
+            log_event_statsig_endpoint: None,
+            log_event_dedupe_cache_limit: None,
+            tokio_worker_threads_background: None,
+        }
+    }
+
+    #[test]
+    fn cli_http_client_config_defaults_match_existing_values() {
+        let cli = Cli::parse_from(["server", "http", "disabled"]);
+
+        assert_eq!(cli.http_client_config(), HttpClientConfig::default());
+    }
+
+    #[test]
+    fn cli_http_client_config_uses_explicit_override_values() {
+        let cli = Cli::parse_from([
+            "server",
+            "http",
+            "disabled",
+            "--http-connection-pool-max-idle-per-host",
+            "25",
+            "--http-request-timeout-in-s",
+            "45",
+            "--http-read-timeout-in-s",
+            "20",
+            "--http-connect-timeout-in-s",
+            "5",
+            "--http-connection-pool-idle-timeout-in-s",
+            "15",
+        ]);
+
+        assert_eq!(
+            cli.http_client_config(),
+            HttpClientConfig::new(45, 20, 5, 15, 25)
+        );
+    }
+
+    #[test]
+    fn cli_accepts_update_batch_size_as_alias_for_max_in_flight() {
+        let cli = Cli::parse_from(["server", "http", "disabled", "--update-batch-size", "32"]);
+
+        assert_eq!(cli.max_in_flight, 32);
+    }
+
+    #[test]
+    fn cli_disables_id_list_file_refresh_observer_by_default() {
+        let cli = Cli::parse_from(["server", "http", "disabled"]);
+
+        assert!(!cli.id_list_file_refresh_observer_enabled);
+    }
+
+    #[test]
+    fn cli_enables_id_list_file_refresh_observer_with_flag() {
+        let cli = Cli::parse_from([
+            "server",
+            "http",
+            "disabled",
+            "--id-list-file-refresh-observer-enabled",
+        ]);
+
+        assert!(cli.id_list_file_refresh_observer_enabled);
+    }
+
+    #[test]
+    fn download_id_list_file_base_url_uses_specific_override_first() {
+        let overrides = make_overrides(
+            Some("https://api.statsigcdn.com"),
+            Some("https://idliststorage.blob.core.windows.net/idlists"),
+        );
+        assert_eq!(
+            resolve_download_id_list_file_base_url(&overrides),
+            "https://idliststorage.blob.core.windows.net/idlists"
+        );
+    }
+
+    #[test]
+    fn download_id_list_file_base_url_falls_back_to_statsig_endpoint() {
+        let overrides = make_overrides(Some("https://proxy.example.com"), None);
+        assert_eq!(
+            resolve_download_id_list_file_base_url(&overrides),
+            "https://proxy.example.com"
+        );
+    }
+
+    #[test]
+    fn download_id_list_file_base_url_falls_back_to_legacy_default() {
+        let overrides = make_overrides(None, None);
+        assert_eq!(
+            resolve_download_id_list_file_base_url(&overrides),
+            "https://api.statsigcdn.com"
+        );
+    }
+
+    #[test]
+    fn create_dcs_blob_config_returns_none_for_empty_company_id() {
+        let mut overrides = make_overrides(None, None);
+        overrides.enable_blob_storage_for_download_config_specs = Some(true);
+        overrides.dcs_blob_storage_connection_string = Some("DefaultEndpointsProtocol=https;AccountName=idliststorage;AccountKey=ZmFrZS1rZXk=;EndpointSuffix=core.windows.net".to_string());
+        overrides.dcs_blob_storage_company_id = Some("   ".to_string());
+
+        assert!(create_dcs_blob_config(&overrides).is_none());
+    }
 }

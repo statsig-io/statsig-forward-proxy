@@ -1,4 +1,4 @@
-worker_processes auto;
+worker_processes {{NGINX_WORKER_PROCESSES}};
 
 events {
     worker_connections 1024;
@@ -6,15 +6,76 @@ events {
 }
 
 http {
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+
     error_log /dev/stderr error;
-    proxy_cache_path {{PROXY_CACHE_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m manager_files={{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}} manager_threshold={{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}} manager_sleep={{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}} inactive=30s use_temp_path=off;
+    proxy_cache_path {{PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m manager_files={{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}} manager_threshold={{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}} manager_sleep={{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}} inactive=30s use_temp_path=off;
+    proxy_cache_path {{PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_id_list_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m manager_files={{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}} manager_threshold={{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}} manager_sleep={{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}} inactive=20m use_temp_path=off;
+    # Normalize supported Accept-Encoding tokens into stable cache-key variants.
+    # Unsupported tokens (e.g. br, zstd) intentionally collapse to the same key
+    # as an empty header since this proxy does not serve those encodings.
+    map $http_accept_encoding $ae_has_gzip {
+        ~*gzip 1;
+        default 0;
+    }
+    map $http_accept_encoding $ae_has_deflate {
+        ~*deflate 1;
+        default 0;
+    }
+    map $http_accept_encoding $ae_has_identity {
+        ~*identity 1;
+        default 0;
+    }
+    map $http_accept_encoding $ae_has_statsig_br {
+        ~*statsig-br 1;
+        default 0;
+    }
+    map "$ae_has_statsig_br$ae_has_gzip$ae_has_deflate$ae_has_identity" $ae_norm {
+        default "";
+        "1000" "statsig-br";
+        "0100" "gzip";
+        "0010" "deflate";
+        "0001" "identity";
+        "1100" "statsig-br,gzip";
+        "1010" "statsig-br,deflate";
+        "1001" "statsig-br,identity";
+        "0110" "gzip,deflate";
+        "0101" "gzip,identity";
+        "0011" "deflate,identity";
+        "1110" "statsig-br,gzip,deflate";
+        "1101" "statsig-br,gzip,identity";
+        "1011" "statsig-br,deflate,identity";
+        "0111" "gzip,deflate,identity";
+        "1111" "statsig-br,gzip,deflate,identity";
+    }
+    # Bucket download_id_list_file requests by whether nginx can safely serve
+    # the client's Range from one canonical full-file cache object:
+    # - no Range and bytes=0- use the canonical object
+    # - positive-start Range requests with a manifest size hint use the canonical object
+    # - ranged requests without a size hint keep the legacy per-Range cache
+    map "$http_range|$http_statsig_id_list_file_size" $download_id_list_cache_bucket {
+        "~^\|"                         canonical;
+        "~^bytes=0-\|"                 canonical;
+        "~^bytes=[0-9]+-\|[0-9]+$"     canonical;
+        default                        short;
+    }
+    upstream sfp_backend {
+        server 127.0.0.1:8080;
+        keepalive 64;
+        keepalive_requests 1000;
+        keepalive_timeout 30s;
+    }
 
     server {
         listen 8000;
         server_name localhost;
 
         location /v1/log_event {
-            proxy_pass http://127.0.0.1:8080;
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -22,15 +83,92 @@ http {
             proxy_cache off;
         }
 
+        location /v1/get_id_lists {
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache download_cache;
+            proxy_cache_methods POST;
+            proxy_cache_key "$request_method$request_uri$http_statsig_api_key$ae_norm";
+            proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+            proxy_cache_background_update on;
+            proxy_cache_valid 200 {{PROXY_CACHE_TTL}};
+            proxy_cache_lock on;
+        }
+
+        location /v1/download_id_list_file/ {
+            # Use internal redirects to pick one of two cache strategies without exposing
+            # the synthetic 418/419 statuses to clients.
+            error_page 418 = @download_id_list_full_file_cache;
+            error_page 419 = @download_id_list_short_cache;
+
+            if ($download_id_list_cache_bucket = canonical) {
+                return 418;
+            }
+            return 419;
+        }
+
+        location @download_id_list_full_file_cache {
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            # Fetch and cache one full 200 body; nginx applies client Range on the
+            # cached object for 206 responses.
+            proxy_set_header Range "";
+            proxy_force_ranges on;
+            proxy_cache download_id_list_cache;
+            proxy_cache_methods GET;
+            proxy_cache_key "$request_method$uri$arg_k$http_statsig_id_list_file_size";
+
+            proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+            proxy_cache_background_update on;
+            proxy_cache_valid 200 20m;
+            proxy_cache_lock on;
+        }
+
+        location @download_id_list_short_cache {
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            # Preserve the original Range on cache misses so upstream serves the
+            # requested byte window.
+            proxy_set_header Range $http_range;
+            proxy_cache download_id_list_cache;
+            proxy_cache_methods GET;
+
+            # Short TTL bucket:
+            # all other ranges get their own cache key
+            proxy_cache_key "$request_method$uri$arg_k$http_statsig_id_list_file_size|$http_range";
+
+            proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+            proxy_cache_background_update on;
+            proxy_cache_valid 200 206 5m;
+            proxy_cache_lock on;
+        }
+
         location / {
-            proxy_pass http://127.0.0.1:8080;
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_cache download_cache;
             proxy_cache_methods GET POST;
-            proxy_cache_key "$request_method$request_uri$http_statsig_api_key$http_accept_encoding$http_supports_proto$request_body";
+            proxy_cache_key "$request_method$request_uri$http_statsig_api_key$ae_norm$http_supports_proto$request_body";
             proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
             proxy_cache_background_update on;
             proxy_cache_valid 200 {{PROXY_CACHE_TTL}};
@@ -55,7 +193,9 @@ http {
         ssl_verify_depth 3;
 
         location /v1/log_event {
-            proxy_pass http://127.0.0.1:8080;
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -63,15 +203,92 @@ http {
             proxy_cache off;
         }
 
+        location /v1/get_id_lists {
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache download_cache;
+            proxy_cache_methods POST;
+            proxy_cache_key "$request_method$request_uri$http_statsig_api_key$ae_norm";
+            proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+            proxy_cache_background_update on;
+            proxy_cache_valid 200 {{PROXY_CACHE_TTL}};
+            proxy_cache_lock on;
+        }
+
+        location /v1/download_id_list_file/ {
+            # Use internal redirects to pick one of two cache strategies without exposing
+            # the synthetic 418/419 statuses to clients.
+            error_page 418 = @download_id_list_full_file_cache;
+            error_page 419 = @download_id_list_short_cache;
+
+            if ($download_id_list_cache_bucket = canonical) {
+                return 418;
+            }
+            return 419;
+        }
+
+        location @download_id_list_full_file_cache {
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            # Fetch and cache one full 200 body; nginx applies client Range on the
+            # cached object for 206 responses.
+            proxy_set_header Range "";
+            proxy_force_ranges on;
+            proxy_cache download_id_list_cache;
+            proxy_cache_methods GET;
+            proxy_cache_key "$request_method$uri$arg_k$http_statsig_id_list_file_size";
+
+            proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+            proxy_cache_background_update on;
+            proxy_cache_valid 200 20m;
+            proxy_cache_lock on;
+        }
+
+        location @download_id_list_short_cache {
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            # Preserve the original Range on cache misses so upstream serves the
+            # requested byte window.
+            proxy_set_header Range $http_range;
+            proxy_cache download_id_list_cache;
+            proxy_cache_methods GET;
+
+            # Short TTL bucket:
+            # all other ranges get their own cache key
+            proxy_cache_key "$request_method$uri$arg_k$http_statsig_id_list_file_size|$http_range";
+
+            proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+            proxy_cache_background_update on;
+            proxy_cache_valid 200 206 5m;
+            proxy_cache_lock on;
+        }
+
         location / {
-            proxy_pass http://127.0.0.1:8080;
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_cache download_cache;
             proxy_cache_methods GET POST;
-            proxy_cache_key "$request_method$request_uri$http_statsig_api_key$http_accept_encoding$http_supports_proto$request_body";
+            proxy_cache_key "$request_method$request_uri$http_statsig_api_key$ae_norm$http_supports_proto$request_body";
             proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
             proxy_cache_background_update on;
             proxy_cache_valid 200 {{PROXY_CACHE_TTL}};
