@@ -1,5 +1,6 @@
 pub mod background_data_provider;
 pub mod background_poll_dispatch;
+mod background_request_interval_tracker;
 pub mod dcs_blob_url_generator;
 pub mod http_data_provider;
 mod request_backoff;
