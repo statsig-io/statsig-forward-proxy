@@ -2,11 +2,14 @@
 set -e
 
 export PROXY_CACHE_PATH_CONFIGURATION=${PROXY_CACHE_PATH_CONFIGURATION:-"/dev/shm/nginx"}
+export PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION=${PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION:-"${PROXY_CACHE_PATH_CONFIGURATION}/download_cache"}
+export PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION=${PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION:-"${PROXY_CACHE_PATH_CONFIGURATION}/download_id_list"}
 export PROXY_CACHE_MAX_SIZE_IN_MB=${PROXY_CACHE_MAX_SIZE_IN_MB:-"1024"}
 export PROXY_CACHE_TTL=${PROXY_CACHE_TTL:-"5s"}
 export PROXY_CACHE_CLEANUP_MAX_DURATION_MS=${PROXY_CACHE_CLEANUP_MAX_DURATION_MS:-"200"}
 export PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS=${PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS:-"50"}
 export PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL=${PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL:-"100"}
+export NGINX_WORKER_PROCESSES=${NGINX_WORKER_PROCESSES:-"auto"}
 
 HTTPS_PORT="8443"
 ENFORCE_TLS="false"
@@ -70,6 +73,31 @@ validate_nginx_duration() {
     esac
 }
 
+validate_nginx_worker_processes() {
+    local value="$1"
+    local arg_name="$2"
+
+    if [ -z "$value" ]; then
+        echo "Error: $arg_name requires a value" >&2
+        exit 1
+    fi
+
+    case "$value" in
+        auto)
+            ;;
+        *[!0-9]*)
+            echo "Error: $arg_name must be 'auto' or a positive integer, got: $value" >&2
+            exit 1
+            ;;
+        0)
+            echo "Error: $arg_name must be greater than 0 when numeric, got: $value" >&2
+            exit 1
+            ;;
+        *)
+            ;;
+    esac
+}
+
 NEXT_ARG_IS=""
 for arg in "$@"; do
     case "$NEXT_ARG_IS" in
@@ -120,6 +148,7 @@ for arg in "$@"; do
 done
 
 validate_nginx_duration "$PROXY_CACHE_TTL" "PROXY_CACHE_TTL"
+validate_nginx_worker_processes "$NGINX_WORKER_PROCESSES" "NGINX_WORKER_PROCESSES"
 
 case "$NEXT_ARG_IS" in
     "cert")
@@ -148,14 +177,17 @@ else
     TEMPLATE_FILE="/nginx-http-https.conf.template"
 fi
 
-# Ensure the cache directory exists and is writable (works for /dev/shm as non-root)
-mkdir -p "$PROXY_CACHE_PATH_CONFIGURATION"
+# Ensure the cache directories exist under the configured writable cache root.
+mkdir -p "$PROXY_CACHE_PATH_CONFIGURATION" "$PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION" "$PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION"
 
 NGINX_CONF="/tmp/nginx.conf"
 
 sed -e "s|{{PROXY_CACHE_PATH_CONFIGURATION}}|$PROXY_CACHE_PATH_CONFIGURATION|g" \
+    -e "s|{{PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION}}|$PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION|g" \
+    -e "s|{{PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION}}|$PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION|g" \
     -e "s|{{PROXY_CACHE_MAX_SIZE_IN_MB}}|$PROXY_CACHE_MAX_SIZE_IN_MB|g" \
     -e "s|{{PROXY_CACHE_TTL}}|$PROXY_CACHE_TTL|g" \
+    -e "s|{{NGINX_WORKER_PROCESSES}}|$NGINX_WORKER_PROCESSES|g" \
     -e "s|{{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}}|$PROXY_CACHE_CLEANUP_MAX_DURATION_MS|g" \
     -e "s|{{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}}|$PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL|g" \
     -e "s|{{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}}|$PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS|g" \

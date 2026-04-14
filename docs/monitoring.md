@@ -276,7 +276,7 @@ We emit a number of events that allow you to monitor and ensure that the forward
 
 ### NginxCacheBytesUsed
 
-- **Description**: Represents the amount of data currently stored in the nginx cache
+- **Description**: Represents the total amount of data currently stored across the nginx caches
 - **Event Unit Type**: bytes
 - **How to Interpret**:
   - Look at the latest value that is emitted per pod
@@ -284,7 +284,7 @@ We emit a number of events that allow you to monitor and ensure that the forward
 
 ### NginxCacheBytesLimit
 
-- **Description**: Represents the amount of data that the nginx cache is configured to store
+- **Description**: Represents the total amount of data that the nginx caches are configured to store
 - **Event Unit Type**: bytes
 - **How to Interpret**:
   - Look at the latest value that is emitted per pod

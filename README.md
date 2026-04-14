@@ -55,8 +55,10 @@ Options:
           [default: 1000]
   -p, --polling-interval-in-s <POLLING_INTERVAL_IN_S>
           [default: 10]
-  -u, --update-batch-size <UPDATE_BATCH_SIZE>
+  -u, --max-in-flight <MAX_IN_FLIGHT>
           [default: 64]
+      --background-poll-item-spacing-ms <BACKGROUND_POLL_ITEM_SPACING_MS>
+          [default: 0]
   -r, --redis-leader-key-ttl <REDIS_LEADER_KEY_TTL>
           [default: 70]
       --redis-cache-ttl-in-s <REDIS_CACHE_TTL_IN_S>
@@ -78,6 +80,16 @@ Options:
       --enforce-tls
           [default: false]
       --enforce-mtls
+
+      --http-connection-pool-max-idle-per-host <HTTP_CONNECTION_POOL_MAX_IDLE_PER_HOST>
+          [default: 10]
+      --http-request-timeout-in-s <HTTP_REQUEST_TIMEOUT_IN_S>
+          [default: 30]
+      --http-read-timeout-in-s <HTTP_READ_TIMEOUT_IN_S>
+          [default: 10]
+      --http-connect-timeout-in-s <HTTP_CONNECT_TIMEOUT_IN_S>
+          [default: 10]
+      --id-list-file-refresh-observer-enabled
 
   -h, --help
           Print help
@@ -103,6 +115,102 @@ Additional logging parameters we support:
 --clear-datastore-on-unauthorized: When a 401/403 is received, clear external caches (such as redis), as well as, internal caches. Noting that this is a potential reliability trade off.
 ```
 
+### Beta Endpoint Support
+
+The `/v1/download_id_list_file` and `/v2/download_config_specs_deltas` endpoints are currently in beta. Their proxy behavior is available for validation, but customers should treat these paths as beta until they are promoted to stable support.
+
+### Background Polling And Request Backoff
+
+These flags control how the proxy paces background refresh traffic and how it backs off per key after upstream failures:
+
+```
+--polling-interval-in-s: Primary background poll cadence. Each cycle adds a small per-process jitter so pods do not wake up in lockstep. Also the initial per-key retry delay after an upstream fetch error. Consecutive failures double from this value and cap at 300s.
+--max-in-flight: Maximum number of background refresh requests allowed in flight at once. This concurrency limit also applies to startup warmup fetches.
+--background-poll-item-spacing-ms: Minimum delay between background request launches within a poll cycle. Use this to stagger bursts across pods. 0 disables pacing.
+--clear-datastore-on-unauthorized: On 401/403, clear caches instead of serving stale data. Unauthorized responses also clear request-backoff state so the next poll can retry immediately after credentials are fixed.
+--id-list-file-refresh-observer-enabled: Enables the observer that reads `/v1/get_id_lists` manifests and asynchronously refreshes referenced `/v1/download_id_list_file` payloads. Disabled by default.
+```
+
+Related environment variable:
+`TOKIO_WORKER_THREADS_BACKGROUND`: Worker thread count for the dedicated Tokio runtime used by background polling loops. Must be a positive integer. Defaults to host CPU count.
+
+Example direct image invocation with burst smoothing:
+
+```bash
+docker run --rm -p 8000:8000 -p 50051:50051 \
+  -e STATSIG_SERVER_SDK_KEY=secret-server-key \
+  statsig/statsig-forward-proxy:latest \
+  http disabled \
+  --polling-interval-in-s 15 \
+  --max-in-flight 16 \
+  --background-poll-item-spacing-ms 25 \
+  --clear-datastore-on-unauthorized \
+  --id-list-file-refresh-observer-enabled
+```
+
+### Outbound Fetch HTTP Client
+
+These flags control the outbound HTTP client used for config spec, id list, and id list file fetches:
+
+```
+--http-connection-pool-max-idle-per-host: Maximum idle connections to keep per upstream host. Default 10.
+--http-request-timeout-in-s: Total request timeout for outbound fetches. Default 30.
+--http-read-timeout-in-s: Read timeout for outbound fetches. Default 10.
+--http-connect-timeout-in-s: Connect timeout for outbound fetches. Default 10.
+```
+
+These settings apply to the background and foreground data-fetch paths. They do not change Redis, nginx, gRPC, or log-event client timeouts.
+
+Example direct image invocation:
+
+```bash
+docker run --rm -p 8000:8000 -p 50051:50051 \
+  -e STATSIG_SERVER_SDK_KEY=secret-server-key \
+  statsig/statsig-forward-proxy:latest \
+  http disabled \
+  --http-request-timeout-in-s 45 \
+  --http-read-timeout-in-s 20 \
+  --http-connect-timeout-in-s 5 \
+  --http-connection-pool-max-idle-per-host 25
+```
+
+### Startup Warm-up Keys
+
+On startup, the proxy can prefetch a fixed set of SDK/path combinations before the normal background polling loop begins. Configure this with `SFP_STARTUP_WARMUP_KEYS_JSON`.
+
+The value must be a JSON array. Each item requires:
+- `sdk_key`: the Statsig SDK key to warm. It must start with `client-`, `server-`, or `secret-`.
+- `path`: one of `/v1/download_config_specs`, `/v2/download_config_specs`, or `/v1/get_id_lists`
+- `encodings`: optional list of request-context encodings to warm
+
+Example:
+
+```json
+[
+  {
+    "sdk_key": "secret-client-key",
+    "path": "/v1/download_config_specs",
+    "encodings": ["gzip", "statsig-br"]
+  },
+  {
+    "sdk_key": "secret-client-key",
+    "path": "/v2/download_config_specs",
+    "encodings": ["gzip", "statsig-br"]
+  },
+  {
+    "sdk_key": "secret-client-key",
+    "path": "/v1/get_id_lists",
+    "encodings": ["gzip"]
+  }
+]
+```
+
+Notes:
+- Invalid entries are skipped individually. Startup logs include a configured/valid/invalid summary so you can spot bad payloads without losing the valid entries.
+- In current proxy versions, omitted or unsupported encodings fall back to the plain-text request-context behavior. If you want a compressed warm-up entry, specify `gzip` explicitly.
+- `statsig-br` is only useful for config-spec warm-up entries that should target that distinct cache key.
+- This environment variable contains SDK keys. In Kubernetes, prefer injecting it from a Secret rather than placing it directly in a ConfigMap-backed values block.
+
 # Configuration
 
 If you are using additionaly dependencies such as, redis or datadog, take a look at the implementation files
@@ -113,10 +221,13 @@ configured correctly.
 
 We leverage nginx to leverage it as a passthrough proxy with request queueing, per recommendation of the [rocket framework](https://rocket.rs/guide/v0.5/deploying/#overview).
 
-In addition to this, we leverage it as a cache. To configure this cache, we expose three environment variables:
-- PROXY_CACHE_PATH_CONFIGURATION: The directory at which to store cached data, by default, is /dev/shm
-- PROXY_CACHE_MAX_SIZE_IN_MB: The size of the nginx cache, which by default is 1024mb
+In addition to this, we leverage it as a cache. To configure this cache/fronting layer, we expose these environment variables:
+- PROXY_CACHE_PATH_CONFIGURATION: The root directory at which to store cached data, by default, is /dev/shm/nginx
+- PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION: The directory for download_config_specs cache data, by default, is ${PROXY_CACHE_PATH_CONFIGURATION}/download_cache
+- PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION: The directory for download_id_list cache data, by default, is ${PROXY_CACHE_PATH_CONFIGURATION}/download_id_list
+- PROXY_CACHE_MAX_SIZE_IN_MB: The size of each nginx cache, which by default is 1024mb
 - PROXY_CACHE_TTL: TTL for cached 200 responses in nginx (first layer cache), default 5s (must include a unit, e.g. 500ms, 5s, 1m)
+- NGINX_WORKER_PROCESSES: nginx worker process count (`auto` or a positive integer), default `auto`
 
 Note: In most cases, the default size limit for /dev/shm is 64mb, in our next major version release, we plan to align the default value for PROXY_CACHE_MAX_SIZE_IN_MB to this. In most scenarios, this should not matter, however, if your config spec payload is multiple MB, this is something to be aware of.
 

@@ -3,4 +3,6 @@ pub mod grpc_server;
 pub mod http_apis;
 pub mod http_server;
 pub mod normalized_path;
+pub mod request_logging_fairing;
+pub mod sdk_key_normalizer;
 pub mod streaming_channel;

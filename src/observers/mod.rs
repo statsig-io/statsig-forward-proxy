@@ -12,7 +12,10 @@ use crate::{
         config_spec_store::ConfigSpecForCompany,
         data_providers::{FullRequestContext, ResponseContext},
     },
-    servers::authorized_request_context::AuthorizedRequestContext,
+    servers::{
+        authorized_request_context::AuthorizedRequestContext, normalized_path::NormalizedPath,
+    },
+    utils::compress_encoder::encoding_priority,
 };
 
 #[async_trait]
@@ -30,7 +33,7 @@ pub trait HttpDataProviderObserverTrait {
     ) -> Option<Arc<ConfigSpecForCompany>>;
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ProxyEventType {
     HttpServerRequestSuccess,
     HttpServerRequestFailed,
@@ -38,6 +41,8 @@ pub enum ProxyEventType {
     HttpDataProviderNoData,
     HttpDataProviderNoDataDueToBadLcut,
     HttpDataProviderError,
+    DownloadIdListFileSizeBytes,
+    DcsFetchSource,
     RedisCacheWriteSucceed,
     RedisCacheWriteFailed,
     RedisCacheReadSucceed,
@@ -75,6 +80,10 @@ impl std::fmt::Display for ProxyEventType {
                 write!(f, "HttpDataProviderNoDataDueToBadLcut")
             }
             ProxyEventType::HttpDataProviderError => write!(f, "HttpDataProviderError"),
+            ProxyEventType::DownloadIdListFileSizeBytes => {
+                write!(f, "DownloadIdListFileSizeBytes")
+            }
+            ProxyEventType::DcsFetchSource => write!(f, "DcsFetchSource"),
             ProxyEventType::RedisCacheWriteSucceed => write!(f, "RedisCacheWriteSucceed"),
             ProxyEventType::RedisCacheWriteFailed => write!(f, "RedisCacheWriteFailed"),
             ProxyEventType::RedisCacheReadSucceed => write!(f, "RedisCacheReadSucceed"),
@@ -141,6 +150,12 @@ pub struct ProxyEvent {
     pub stat: Option<EventStat>,
     pub status_code: Option<u16>,
     pub response_encoding: Option<String>,
+    pub sdk_type: Option<String>,
+    // `statsig-sdk-version` is semver-like (string), not numeric.
+    pub sdk_version: Option<String>,
+    pub accept_encoding: Option<String>,
+    pub service: Option<String>,
+    pub response_payload_type: Option<String>,
 }
 
 impl ProxyEvent {
@@ -155,6 +170,11 @@ impl ProxyEvent {
             stat: None,
             status_code: None,
             response_encoding: None,
+            sdk_type: None,
+            sdk_version: None,
+            accept_encoding: None,
+            service: None,
+            response_payload_type: None,
         }
     }
 
@@ -166,6 +186,11 @@ impl ProxyEvent {
             stat: None,
             status_code: None,
             response_encoding: None,
+            sdk_type: None,
+            sdk_version: None,
+            accept_encoding: None,
+            service: None,
+            response_payload_type: None,
         }
     }
 
@@ -199,14 +224,53 @@ impl ProxyEvent {
         self.request_context.as_ref().map(|rc| rc.path.as_str())
     }
 
+    pub fn get_id_list_file_id(&self) -> Option<&str> {
+        self.request_context.as_ref().and_then(|rc| {
+            if rc.path == NormalizedPath::V1DownloadIdListFile {
+                rc.file_id.as_deref()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn should_tag_id_list_file_id(&self) -> bool {
+        matches!(self.event_type, ProxyEventType::DownloadIdListFileSizeBytes)
+    }
+
     pub fn get_accept_encodings(&self) -> Option<String> {
-        self.request_context
-            .as_ref()
-            .map(|rc| format!("{:?}", rc.encodings))
+        if let Some(accept_encoding) = self.accept_encoding.clone() {
+            return Some(accept_encoding);
+        }
+
+        let rc = self.request_context.as_ref()?;
+        if rc.encodings.is_empty() {
+            return Some("none".to_string());
+        }
+
+        // Avoid `Debug` formatting (spaces/brackets) since those values become metric tags.
+        // Keep ordering stable and close to the logger normalization ordering.
+        let mut encodings = rc.encodings.clone();
+        encodings.sort_by_key(|encoding| encoding_priority(*encoding));
+        encodings.dedup();
+
+        Some(
+            encodings
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("+"),
+        )
     }
 
     pub fn with_response_encoding(mut self, encoding: String) -> Self {
-        self.response_encoding = Some(encoding);
+        let normalized = encoding
+            .split(',')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("+");
+        self.response_encoding = Some(normalized);
         self
     }
 
@@ -224,6 +288,31 @@ impl ProxyEvent {
         self.status_code = Some(code);
         self
     }
+
+    pub fn with_sdk_type(mut self, sdk_type: String) -> Self {
+        self.sdk_type = Some(sdk_type);
+        self
+    }
+
+    pub fn with_sdk_version(mut self, sdk_version: String) -> Self {
+        self.sdk_version = Some(sdk_version);
+        self
+    }
+
+    pub fn with_accept_encoding(mut self, accept_encoding: String) -> Self {
+        self.accept_encoding = Some(accept_encoding);
+        self
+    }
+
+    pub fn with_service(mut self, service: String) -> Self {
+        self.service = Some(service);
+        self
+    }
+
+    pub fn with_response_payload_type(mut self, payload_type: String) -> Self {
+        self.response_payload_type = Some(payload_type);
+        self
+    }
 }
 
 static SDK_KEY_CACHE: Lazy<RwLock<HashMap<String, Arc<str>>>> =
@@ -238,19 +327,33 @@ use std::hash::{Hash, Hasher};
 
 impl Hash for ProxyEvent {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.event_type.hash(state);
         if let Some(rc) = &self.request_context {
             rc.sdk_key.hash(state);
             rc.path.hash(state);
         }
         self.lcut.hash(state);
+        self.response_encoding.hash(state);
+        self.accept_encoding.hash(state);
+        self.sdk_type.hash(state);
+        self.sdk_version.hash(state);
+        self.service.hash(state);
+        self.response_payload_type.hash(state);
         self.status_code.hash(state);
     }
 }
 
 impl PartialEq for ProxyEvent {
     fn eq(&self, other: &Self) -> bool {
-        self.request_context == other.request_context
+        self.event_type == other.event_type
+            && self.request_context == other.request_context
             && self.lcut == other.lcut
+            && self.response_encoding == other.response_encoding
+            && self.accept_encoding == other.accept_encoding
+            && self.sdk_type == other.sdk_type
+            && self.sdk_version == other.sdk_version
+            && self.service == other.service
+            && self.response_payload_type == other.response_payload_type
             && self.status_code == other.status_code
     }
 }

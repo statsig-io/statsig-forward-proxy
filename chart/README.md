@@ -33,6 +33,87 @@ For Statsig Forward Proxy to function correctly, you must provide your Statsig S
 helm install statsig-forward-proxy statsig/statsig-forward-proxy
 ```
 
+### Beta Endpoint Support
+
+The `/v1/download_id_list_file` and `/v2/download_config_specs_deltas` endpoints are currently in beta. Their proxy behavior is available for validation, but customers should treat these paths as beta until they are promoted to stable support.
+
+### Example: Tune Outbound Fetch HTTP Client
+
+The chart already forwards raw container arguments through `sfp.args`. To customize the outbound fetch HTTP client used for config and id-list fetches, set the CLI flags there:
+
+```yaml
+sfp:
+  args:
+    - http
+    - disabled
+    - --http-request-timeout-in-s
+    - "45"
+    - --http-read-timeout-in-s
+    - "20"
+    - --http-connect-timeout-in-s
+    - "5"
+    - --http-connection-pool-max-idle-per-host
+    - "25"
+```
+
+These flags affect the proxy's outbound data-fetch paths only. They do not change Redis, nginx, gRPC, or log-event client timeouts.
+
+### Example: Tune Background Polling and Request Backoff
+
+Background dispatch and backoff settings are also passed through `sfp.args`:
+
+```yaml
+sfp:
+  args:
+    - http
+    - disabled
+    - --polling-interval-in-s
+    - "15"
+    - --max-in-flight
+    - "16"
+    - --background-poll-item-spacing-ms
+    - "25"
+    - --clear-datastore-on-unauthorized
+    - --id-list-file-refresh-observer-enabled
+```
+
+What these flags do:
+- `--polling-interval-in-s` sets the primary background poll cadence and the initial per-key retry delay after upstream fetch errors.
+- `--max-in-flight` caps background refresh concurrency and also applies to startup warmup fetches.
+- `--background-poll-item-spacing-ms` adds delay between launches inside each polling cycle. `0` disables pacing.
+- `--clear-datastore-on-unauthorized` clears cached data on 401/403 responses instead of serving stale results.
+- `--id-list-file-refresh-observer-enabled` enables asynchronous refreshes for `/v1/download_id_list_file` payloads referenced by `/v1/get_id_lists` manifests. It is disabled by default.
+
+### Example: Configure Startup Warm-up Keys
+
+The proxy can prefetch a fixed set of SDK/path combinations before the steady-state background polling loop starts by setting `SFP_STARTUP_WARMUP_KEYS_JSON`.
+
+The value is a JSON array. Each entry must contain:
+- `sdk_key` (must start with `client-`, `server-`, or `secret-`)
+- `path`: `/v1/download_config_specs`, `/v2/download_config_specs`, or `/v1/get_id_lists`
+- `encodings` (optional): use `["gzip"]` for the common compressed variant; `statsig-br` is only relevant for config-spec warm-up entries
+
+Because this value contains SDK keys, it should usually come from a Kubernetes Secret, not from the chart's ConfigMap-backed `sfp.environment`.
+
+```bash
+kubectl create secret generic sfp-startup-warmup \
+  --from-literal=SFP_STARTUP_WARMUP_KEYS_JSON='[
+    {"sdk_key":"secret-client-key","path":"/v1/download_config_specs","encodings":["gzip","statsig-br"]},
+    {"sdk_key":"secret-client-key","path":"/v2/download_config_specs","encodings":["gzip","statsig-br"]},
+    {"sdk_key":"secret-client-key","path":"/v1/get_id_lists","encodings":["gzip"]}
+  ]'
+```
+
+```yaml
+sfp:
+  secrets:
+    - envName: SFP_STARTUP_WARMUP_KEYS_JSON
+      secretName: sfp-startup-warmup
+      secretKey: SFP_STARTUP_WARMUP_KEYS_JSON
+```
+
+At startup, invalid entries are skipped individually and the proxy logs a configured/valid/invalid summary. Omitted or unsupported encodings fall back to the plain-text request-context behavior used by current proxy versions.
+
 ## Configurations
 
 The default values file is only intended to be a starting point of configuring Statsig Forward Proxy that works with your environment and setup. Please read the following reference and [deployment options](https://github.com/statsig-io/statsig-forward-proxy?tab=readme-ov-file#deploying) to properly configure the deployment to meet your need.
@@ -83,10 +164,10 @@ The default values file is only intended to be a starting point of configuring S
 | nodeSelector                          | object  | `{}`                               | Node labels for pod assignment                                                          |
 | tolerations                           | array   | `[]`                               | Tolerations for pod assignment                                                          |
 | affinity                              | object  | `{}`                               | Affinity for pod assignment                                                             |
-| sfp.environment                       | object  | `{}`                               | Environment variables for Statsig Forward Proxy (via ConfigMap)                         |
-| sfp.args                              | array   | `["http", "disabled"]`             | Container command-line arguments for Statsig Forward Proxy                              |
+| sfp.environment                       | object  | `{}`                               | Environment variables for Statsig Forward Proxy (via ConfigMap). Avoid for secret values such as SDK keys or warm-up JSON |
+| sfp.args                              | array   | `["http", "disabled"]`             | Container command-line arguments for Statsig Forward Proxy, including background polling/backoff knobs such as `--polling-interval-in-s`, `--max-in-flight`, `--background-poll-item-spacing-ms`, and `--id-list-file-refresh-observer-enabled` |
 | sfp.environmentVariables              | array   | `[]`                               | Complex `valueFrom` style variable configurations for the deployment                     |
-| sfp.secrets                           | array   | `[]`                               | Environment variables set from Kubernetes secrets                                        |
+| sfp.secrets                           | array   | `[]`                               | Environment variables set from Kubernetes secrets. Preferred for `STATSIG_SERVER_SDK_KEY` and `SFP_STARTUP_WARMUP_KEYS_JSON` |
 | sfp.envFromSecret                     | string  | `nil`                              | Name of a Kubernetes secret to set all environment variables from its key-value pairs    |
 | sfp.livenessProbe                     | object  | HTTP check on `/v1/health` endpoint | Container liveness probe configuration                                                  |
 | sfp.readinessProbe                    | object  | HTTP check on `/v1/ready` endpoint| Container readiness probe configuration                                                 |

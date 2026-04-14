@@ -27,6 +27,19 @@ pub struct LogEventStore {
     dedupe_cache_limit: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogEventDedupStats {
+    pub batch_in_size: usize,
+    pub batch_out_size: usize,
+    pub deduped_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepackagedLogEventRequest {
+    pub body: String,
+    pub stats: LogEventDedupStats,
+}
+
 impl LogEventStore {
     pub fn new(base_url: &str, http_client: reqwest::Client, dedupe_cache_limit: usize) -> Self {
         LogEventStore {
@@ -43,22 +56,19 @@ impl LogEventStore {
         mut data: LogEventRequest,
         request_context: &Arc<AuthorizedRequestContext>,
     ) -> Result<String, Status> {
-        let batch_in_size = data.events.len();
-        data.events
-            .retain(|e| self.process_event(&request_context.sdk_key, &data.statsig_metadata, e));
-        let batch_out_size = data.events.len();
-        let data_string = to_string(&data).map_err(|_| Status::new(500))?;
+        let repackaged =
+            self.dedupe_and_serialize_for_sdk_key(&request_context.sdk_key, &mut data)?;
 
         // todo: ungzip + deduplicate + batching + regzip
         let response = self
             .http_client
             .post(&self.url)
             .header("statsig-api-key", &request_context.sdk_key)
-            .header("statsig-event-count", batch_out_size)
-            .body(data_string)
+            .header("statsig-event-count", repackaged.stats.batch_out_size)
+            .body(repackaged.body)
             .send()
             .await;
-        let deduped_count = (batch_in_size - batch_out_size) as i64;
+        let deduped_count = repackaged.stats.deduped_count as i64;
         ProxyEventObserver::publish_event(
             ProxyEvent::new_with_rc(ProxyEventType::LogEventStoreDeduped, request_context)
                 .with_stat(EventStat {
@@ -76,6 +86,34 @@ impl LogEventStore {
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
                 .as_u16(),
         })
+    }
+
+    pub fn dedupe_events_for_sdk_key(
+        &self,
+        sdk_key: &str,
+        data: &mut LogEventRequest,
+    ) -> LogEventDedupStats {
+        let batch_in_size = data.events.len();
+        data.events
+            .retain(|e| self.process_event(sdk_key, &data.statsig_metadata, e));
+        let batch_out_size = data.events.len();
+        let deduped_count = batch_in_size - batch_out_size;
+
+        LogEventDedupStats {
+            batch_in_size,
+            batch_out_size,
+            deduped_count,
+        }
+    }
+
+    pub fn dedupe_and_serialize_for_sdk_key(
+        &self,
+        sdk_key: &str,
+        data: &mut LogEventRequest,
+    ) -> Result<RepackagedLogEventRequest, Status> {
+        let stats = self.dedupe_events_for_sdk_key(sdk_key, data);
+        let body = to_string(data).map_err(|_| Status::new(500))?;
+        Ok(RepackagedLogEventRequest { body, stats })
     }
 
     // returns true if this is a new event
