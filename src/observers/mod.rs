@@ -42,6 +42,7 @@ pub enum ProxyEventType {
     HttpDataProviderNoDataDueToBadLcut,
     HttpDataProviderError,
     DownloadIdListFileSizeBytes,
+    BackgroundDataProviderRequestInterval,
     DcsFetchSource,
     RedisCacheWriteSucceed,
     RedisCacheWriteFailed,
@@ -82,6 +83,9 @@ impl std::fmt::Display for ProxyEventType {
             ProxyEventType::HttpDataProviderError => write!(f, "HttpDataProviderError"),
             ProxyEventType::DownloadIdListFileSizeBytes => {
                 write!(f, "DownloadIdListFileSizeBytes")
+            }
+            ProxyEventType::BackgroundDataProviderRequestInterval => {
+                write!(f, "BackgroundDataProviderRequestInterval")
             }
             ProxyEventType::DcsFetchSource => write!(f, "DcsFetchSource"),
             ProxyEventType::RedisCacheWriteSucceed => write!(f, "RedisCacheWriteSucceed"),

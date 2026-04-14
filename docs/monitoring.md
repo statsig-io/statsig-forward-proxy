@@ -133,6 +133,16 @@ We emit a number of events that allow you to monitor and ensure that the forward
   - Take percentile/average to understand request latency
 - **Is it working?**: This can occur time to time, but does not mean that SDK -> proxy requests are failing. If this is happening consistantly, this will prevent configurations from propagating. Please check https://status.statsig.com, and if there are no updates, message us on slack.
 
+### BackgroundDataProviderRequestInterval
+
+- **Description**: Measures the time between completed background-poll requests for the same sdk_key and path. This does not include foreground fetches or startup warmup fetches.
+- **Event Unit Type**: Latency in ms
+- **Useful Dimensions**: path, sdk_key
+- **How to Interpret**:
+  - Take percentile/average to understand the actual background refresh cadence
+  - Compare against --polling-interval-in-s, while accounting for poll jitter, launch pacing, and request backoff after upstream fetch errors
+- **Is it working?**: This should be close to your configured polling interval. If it is consistently much higher for a given sdk_key and path, the proxy is not refreshing that request context at the expected cadence.
+
 ### RedisCacheWriteSucceed
 
 - **Description**: If using redis caching, indicates a successful write of the latest configuration to redis.

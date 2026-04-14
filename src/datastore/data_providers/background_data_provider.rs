@@ -4,6 +4,7 @@ use crate::utils::compress_encoder::CompressionEncoder;
 use crate::GRACEFUL_SHUTDOWN_TOKEN;
 
 use super::background_poll_dispatch::dispatch_rank;
+use super::background_request_interval_tracker::publish_completed_request_interval;
 use super::http_data_provider::ResponsePayload;
 use super::request_backoff::{RequestBackoffController, RequestBackoffKey, RequestBackoffPolicy};
 use super::request_builder::{CachedRequestBuilders, RequestBuilderTrait};
@@ -46,6 +47,7 @@ struct PreparedFetchExecutionConfig {
     launch_spacing: Duration,
     request_guard_timeout: Duration,
     clear_datastore_on_unauthorized: bool,
+    publish_background_request_interval: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -321,6 +323,10 @@ impl BackgroundDataProvider {
             },
             request_guard_timeout: fetch_config.request_guard_timeout,
             clear_datastore_on_unauthorized: fetch_config.clear_datastore_on_unauthorized,
+            publish_background_request_interval: matches!(
+                fetch_config.execution_mode,
+                FetchExecutionMode::BackgroundPoll { .. }
+            ),
         };
 
         summary.attempted_count = Self::execute_prepared_requests_streaming(
@@ -431,6 +437,10 @@ impl BackgroundDataProvider {
                         item.request_context.path
                     )
                 }
+            }
+
+            if execution_config.publish_background_request_interval {
+                publish_completed_request_interval(&item.request_context);
             }
         });
     }
