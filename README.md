@@ -115,10 +115,6 @@ Additional logging parameters we support:
 --clear-datastore-on-unauthorized: When a 401/403 is received, clear external caches (such as redis), as well as, internal caches. Noting that this is a potential reliability trade off.
 ```
 
-### Beta Endpoint Support
-
-The `/v1/download_id_list_file` and `/v2/download_config_specs_deltas` endpoints are currently in beta. Their proxy behavior is available for validation, but customers should treat these paths as beta until they are promoted to stable support.
-
 ### Background Polling And Request Backoff
 
 These flags control how the proxy paces background refresh traffic and how it backs off per key after upstream failures:
@@ -217,6 +213,10 @@ If you are using additionaly dependencies such as, redis or datadog, take a look
 in order to get an idea of what environment variables you may need to set to ensure those dependencies are
 configured correctly.
 
+For the redis cache specifically, see [Redis Authentication](docs/redis_auth.md), which documents the
+`REDIS_*` environment variables and the supported auth modes (static password/ACL, and optional
+OAuth via Microsoft Entra ID).
+
 # Nginx Caching
 
 We leverage nginx to leverage it as a passthrough proxy with request queueing, per recommendation of the [rocket framework](https://rocket.rs/guide/v0.5/deploying/#overview).
@@ -232,6 +232,48 @@ In addition to this, we leverage it as a cache. To configure this cache/fronting
 Note: In most cases, the default size limit for /dev/shm is 64mb, in our next major version release, we plan to align the default value for PROXY_CACHE_MAX_SIZE_IN_MB to this. In most scenarios, this should not matter, however, if your config spec payload is multiple MB, this is something to be aware of.
 
 By default, we store all error logs at */var/log/nginx/error.log* incase any debugging is needed.
+
+## Benchmarking Nginx Hot Path
+
+To benchmark and validate nginx caching behavior for `/v1|v2/download_config_specs`, run:
+
+```bash
+./scripts/benchmark_nginx_hot_path.py
+```
+
+This script starts a mock upstream, renders `nginx-http-only.conf.template`, runs load against the hot path, and reports throughput, latency percentiles, and an estimated cache hit ratio from upstream hit counts. By default, the mock endpoint returns a 5MB JSON payload per response.
+
+When available, nginx cache data is written to `/dev/shm` (RAM disk). Use `--cache-dir` to override.
+On macOS, `/dev/shm` is typically unavailable, so use a writable path (for example `/tmp/sfp-nginx-bench`) or a mounted RAM disk path under `/Volumes`.
+
+Use `--payload-size-mb` to override the payload size.
+For large payload stress tests, use a higher timeout (default is 15s).
+
+## Load Testing /v1/log_event Throughput
+
+To generate synthetic traffic for a fixed period and measure peak throughput, run:
+
+```bash
+scripts/load_test_log_event.py \
+  --target-url http://127.0.0.1:8000/v1/log_event \
+  --concurrency 128 \
+  --warmup-seconds 10 \
+  --duration-seconds 60
+```
+
+This benchmark is closed-loop (workers continuously issue requests), reports:
+- peak 1-second throughput
+- peak moving-average throughput
+- overall req/s
+- non-2xx/transport error counts
+- latency percentiles from sampled requests
+
+By default, it posts synthetic `/v1/log_event` payloads and can be tuned with:
+- `--events-per-request`
+- `--duplicate-ratio`
+- `--body-pool-size`
+
+You can also supply your own POST body via `--body-file` or target a GET endpoint with `--method GET`.
 
 # Recommended Methods of Deployment
 
