@@ -36,6 +36,7 @@ COPY ./.cargo ./.cargo
 COPY ./Cargo.lock ./Cargo.lock
 COPY ./Cargo.toml ./Cargo.toml
 COPY ./rust-toolchain.toml ./rust-toolchain.toml
+COPY ./benches ./benches
 RUN cp ./src/main.rs ./src/server.rs
 RUN cp ./src/main.rs ./src/client.rs
 RUN rustup update

@@ -33,10 +33,6 @@ For Statsig Forward Proxy to function correctly, you must provide your Statsig S
 helm install statsig-forward-proxy statsig/statsig-forward-proxy
 ```
 
-### Beta Endpoint Support
-
-The `/v1/download_id_list_file` and `/v2/download_config_specs_deltas` endpoints are currently in beta. Their proxy behavior is available for validation, but customers should treat these paths as beta until they are promoted to stable support.
-
 ### Example: Tune Outbound Fetch HTTP Client
 
 The chart already forwards raw container arguments through `sfp.args`. To customize the outbound fetch HTTP client used for config and id-list fetches, set the CLI flags there:
