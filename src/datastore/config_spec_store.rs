@@ -10,12 +10,16 @@ use crate::observers::{
 use crate::servers::authorized_request_context::{
     AuthorizedRequestContext, AuthorizedRequestContextCache,
 };
+use crate::servers::normalized_path::NormalizedPath;
 use crate::utils::compress_encoder::CompressionEncoder;
+use crate::GRACEFUL_SHUTDOWN_TOKEN;
 use bytes::Bytes;
 
 use chrono::Utc;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 
@@ -174,6 +178,53 @@ impl ConfigSpecStore {
             }
         }
     }
+
+    pub fn start_lcut_monitoring(&self, sampling_interval: Duration) {
+        let store = Arc::clone(&self.store);
+        tokio::spawn(async move {
+            loop {
+                current_lcut_events(&store)
+                    .into_iter()
+                    .for_each(ProxyEventObserver::publish_event);
+
+                if tokio::select! {
+                    _ = tokio::time::sleep(sampling_interval) => { false },
+                    _ = GRACEFUL_SHUTDOWN_TOKEN.cancelled() => { true },
+                } {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+fn current_lcut_events(
+    store: &DashMap<Arc<AuthorizedRequestContext>, Arc<ConfigSpecForCompany>>,
+) -> Vec<ProxyEvent> {
+    let mut current_lcuts: HashMap<(String, NormalizedPath), (Arc<AuthorizedRequestContext>, u64)> =
+        HashMap::new();
+    for record in store {
+        let request_context = record.key();
+        let lcut = record.value().lcut;
+        current_lcuts
+            .entry((
+                request_context.sdk_key.clone(),
+                request_context.path.clone(),
+            ))
+            .and_modify(|(_, current_lcut)| *current_lcut = (*current_lcut).min(lcut))
+            .or_insert_with(|| (Arc::clone(request_context), lcut));
+    }
+
+    current_lcuts
+        .into_values()
+        .map(|(request_context, lcut)| {
+            ProxyEvent::new_with_rc(ProxyEventType::ConfigSpecCurrentLcut, &request_context)
+                .with_stat(EventStat {
+                    operation_type: OperationType::Gauge,
+                    value: i64::try_from(lcut).unwrap_or(i64::MAX),
+                })
+        })
+        .collect()
 }
 
 pub fn shadow_fetch_json_config_spec(
@@ -198,4 +249,70 @@ pub fn shadow_fetch_json_config_spec(
             .get_config_spec(&shadow_request_context, since_time)
             .await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_spec(lcut: u64) -> Arc<ConfigSpecForCompany> {
+        Arc::new(ConfigSpecForCompany {
+            lcut,
+            config: Arc::new(ResponsePayload {
+                use_proto: false,
+                encoding: Arc::new(CompressionEncoder::PlainText),
+                data: Arc::new(Bytes::from_static(b"{}")),
+            }),
+        })
+    }
+
+    #[test]
+    fn current_lcut_events_report_unchanged_initial_config() {
+        let request_context = Arc::new(AuthorizedRequestContext::new(
+            "secret-test-key".to_string(),
+            NormalizedPath::V1DownloadConfigSpecs,
+            vec![CompressionEncoder::PlainText],
+        ));
+        let store = DashMap::new();
+        store.insert(Arc::clone(&request_context), config_spec(1234));
+        store.insert(
+            Arc::new(AuthorizedRequestContext::new(
+                "secret-test-key".to_string(),
+                NormalizedPath::V1DownloadConfigSpecs,
+                vec![CompressionEncoder::Gzip],
+            )),
+            config_spec(2345),
+        );
+
+        for events in [current_lcut_events(&store), current_lcut_events(&store)] {
+            assert_eq!(events.len(), 1);
+            let event = &events[0];
+            assert_eq!(event.event_type, ProxyEventType::ConfigSpecCurrentLcut);
+            assert_eq!(event.get_sdk_key().as_deref(), Some("secret-test-key"));
+            assert_eq!(
+                event.get_path(),
+                Some(NormalizedPath::V1DownloadConfigSpecs.as_str())
+            );
+            assert_eq!(event.lcut, None);
+            let stat = event.stat.as_ref().unwrap();
+            assert_eq!(stat.operation_type, OperationType::Gauge);
+            assert_eq!(stat.value, 1234);
+        }
+    }
+
+    #[test]
+    fn current_lcut_events_saturate_values_above_i64_max() {
+        let request_context = Arc::new(AuthorizedRequestContext::new(
+            "secret-test-key".to_string(),
+            NormalizedPath::V2DownloadConfigSpecs,
+            vec![CompressionEncoder::PlainText],
+        ));
+        let store = DashMap::new();
+        store.insert(request_context, config_spec(u64::MAX));
+
+        assert_eq!(
+            current_lcut_events(&store)[0].stat.as_ref().unwrap().value,
+            i64::MAX
+        );
+    }
 }

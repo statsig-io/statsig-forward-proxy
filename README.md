@@ -231,7 +231,39 @@ In addition to this, we leverage it as a cache. To configure this cache/fronting
 
 Note: In most cases, the default size limit for /dev/shm is 64mb, in our next major version release, we plan to align the default value for PROXY_CACHE_MAX_SIZE_IN_MB to this. In most scenarios, this should not matter, however, if your config spec payload is multiple MB, this is something to be aware of.
 
-By default, we store all error logs at */var/log/nginx/error.log* incase any debugging is needed.
+## Nginx Access Logs
+
+The official image emits nginx access logs to container stdout by default for HTTP,
+HTTPS, and combined HTTP/HTTPS deployments. The entrypoint runs nginx with
+`daemon off` while the Rust proxy remains the main process. This works with the
+image's non-root user without a log-file mount, sidecar, or `/proc/1/fd` override;
+standard container log collectors can read the access lines.
+
+The format uses the combined-log layout with a sanitized request path and `-` for
+user, referer, and user-agent fields. Known route names are retained, while dynamic
+path suffixes (including SDK keys in `/v1|v2/download_config_specs/<key>`) are replaced
+with `[REDACTED]`. Unknown paths are logged as `[REDACTED]`. All query strings are
+omitted, including repeated or encoded `k=` parameters. Request headers and bodies
+are never included. Redaction affects logging only, not the forwarded request or
+cache key.
+
+For example:
+
+```text
+127.0.0.1 - - [17/Sep/2026:12:00:00 +0000] "GET /v2/download_config_specs/[REDACTED] HTTP/1.1" 200 42 "-" "-"
+```
+
+Runtime nginx stderr remains suppressed: native nginx error messages can include
+raw request URLs and do not support this access-log redaction format. Configuration
+validation failures are still printed at startup. This redaction guarantee applies
+to the access-log format; custom nginx logging overrides must handle credentials
+separately.
+
+Run the nginx logging regression checks (requires Python 3, nginx, and OpenSSL):
+
+```bash
+python3 scripts/test_nginx_access_logging.py
+```
 
 ## Benchmarking Nginx Hot Path
 

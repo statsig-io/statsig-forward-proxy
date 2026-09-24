@@ -8,12 +8,16 @@ use super::background_request_interval_tracker::publish_completed_request_interv
 use super::http_data_provider::ResponsePayload;
 use super::request_backoff::{RequestBackoffController, RequestBackoffKey, RequestBackoffPolicy};
 use super::request_builder::{CachedRequestBuilders, RequestBuilderTrait};
-use super::{http_data_provider::HttpDataProvider, DataProviderRequestResult, DataProviderTrait};
+use super::{
+    http_data_provider::HttpDataProvider, DataProviderRequestResult, DataProviderResult,
+    DataProviderTrait,
+};
 use super::{FullRequestContext, HttpClientConfig, LazyHttpClient, ResponseContext};
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio::time::{Duration, Instant};
@@ -23,6 +27,13 @@ use dashmap::DashMap;
 pub use super::background_poll_dispatch::BackgroundPollDispatchConfig;
 
 type ForegroundFetchLockKey = RequestBackoffKey;
+
+// A Redis outage must not turn a successful origin poll into a timeout or create an unbounded
+// number of detached refresh tasks. Once this many refreshes are in flight, later unchanged polls
+// skip their touch; the next poll will retry, long before a normally configured cache TTL elapses.
+const MAX_IN_FLIGHT_BACKUP_CACHE_TOUCHES: usize = 64;
+static BACKUP_CACHE_TOUCH_PERMITS: Lazy<Arc<Semaphore>> =
+    Lazy::new(|| Arc::new(Semaphore::new(MAX_IN_FLIGHT_BACKUP_CACHE_TOUCHES)));
 
 #[derive(Clone, Copy, Debug)]
 enum FetchExecutionMode {
@@ -462,6 +473,23 @@ impl BackgroundDataProvider {
             )
             .await;
 
+        Self::process_result(
+            dp_result,
+            request_builder,
+            request_context,
+            lcut,
+            clear_datastore_on_unauthorized,
+        )
+        .await
+    }
+
+    async fn process_result(
+        dp_result: DataProviderResult,
+        request_builder: Arc<dyn RequestBuilderTrait>,
+        request_context: &Arc<FullRequestContext>,
+        lcut: u64,
+        clear_datastore_on_unauthorized: bool,
+    ) -> DataProviderRequestResult {
         match dp_result.result {
             DataProviderRequestResult::DataAvailable => {
                 if let Some(data) = dp_result.body {
@@ -481,6 +509,16 @@ impl BackgroundDataProvider {
                         .await;
                     }
                 }
+            }
+            DataProviderRequestResult::NoDataAvailable => {
+                // A config that never changes is never written, so this is the only place that
+                // can tell the backup cache the entry is still live. Without it the entry ages
+                // out of redis while the config is simply stable, and the miss only surfaces
+                // later, when a cold pod needs the backup and the origin is unreachable.
+                Self::dispatch_backup_cache_touch(
+                    request_builder.get_backup_cache(),
+                    Arc::clone(&request_context.authorized_request_context),
+                );
             }
             DataProviderRequestResult::Error => {
                 if let Some(backup_data) = request_builder
@@ -537,10 +575,23 @@ impl BackgroundDataProvider {
                 )
                 .await;
             }
-            _ => {}
         }
 
         dp_result.result
+    }
+
+    fn dispatch_backup_cache_touch(
+        backup_cache: Arc<dyn crate::observers::HttpDataProviderObserverTrait + Send + Sync>,
+        request_context: Arc<AuthorizedRequestContext>,
+    ) {
+        let Ok(permit) = Arc::clone(&BACKUP_CACHE_TOUCH_PERMITS).try_acquire_owned() else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            let _permit = permit;
+            backup_cache.touch(&request_context).await;
+        });
     }
 
     async fn notify_observers(
@@ -558,14 +609,24 @@ impl BackgroundDataProvider {
 #[cfg(test)]
 mod tests {
     use super::ForegroundFetchLockKey;
-    use super::{BackgroundDataProvider, BackgroundPollDispatchConfig};
+    use super::{BackgroundDataProvider, BackgroundPollDispatchConfig, DataProviderResult};
     use super::{FetchExecutionMode, RequestBackoffController, RequestBackoffPolicy};
+    use crate::datastore::config_spec_store::ConfigSpecForCompany;
     use crate::datastore::data_providers::http_data_provider::HttpDataProvider;
-    use crate::datastore::data_providers::{HttpClientConfig, LazyHttpClient};
+    use crate::datastore::data_providers::request_builder::{
+        RequestBuilderOutcome, RequestBuilderTrait,
+    };
+    use crate::datastore::data_providers::{
+        DataProviderRequestResult, FullRequestContext, HttpClientConfig, LazyHttpClient,
+        ResponseContext,
+    };
     use crate::datastore::sdk_key_store::{SdkKeyStore, SdkKeyStoreItem};
+    use crate::observers::http_data_provider_observer::HttpDataProviderObserver;
+    use crate::observers::HttpDataProviderObserverTrait;
     use crate::servers::authorized_request_context::AuthorizedRequestContext;
     use crate::servers::normalized_path::NormalizedPath;
     use crate::utils::compress_encoder::CompressionEncoder;
+    use async_trait::async_trait;
     use dashmap::DashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -592,6 +653,87 @@ mod tests {
         }
 
         panic!("counter did not reach {expected}");
+    }
+
+    fn test_request_context() -> Arc<AuthorizedRequestContext> {
+        Arc::new(AuthorizedRequestContext::new(
+            "secret-key".to_string(),
+            NormalizedPath::V1DownloadConfigSpecs,
+            vec![CompressionEncoder::PlainText],
+        ))
+    }
+
+    struct BlockingBackupCache {
+        touch_count: AtomicUsize,
+        touch_started: Notify,
+        release_touch: Notify,
+    }
+
+    #[async_trait]
+    impl HttpDataProviderObserverTrait for BlockingBackupCache {
+        fn force_notifier_to_wait_for_update(&self) -> bool {
+            false
+        }
+
+        async fn update(
+            &self,
+            _request_context: &Arc<FullRequestContext>,
+            _response_context: &Arc<ResponseContext>,
+        ) {
+        }
+
+        async fn get(
+            &self,
+            _request_context: &Arc<AuthorizedRequestContext>,
+        ) -> Option<Arc<ConfigSpecForCompany>> {
+            None
+        }
+
+        async fn touch(&self, _request_context: &Arc<AuthorizedRequestContext>) {
+            self.touch_count.fetch_add(1, Ordering::SeqCst);
+            self.touch_started.notify_one();
+            self.release_touch.notified().await;
+        }
+    }
+
+    struct TouchTestRequestBuilder {
+        backup_cache: Arc<BlockingBackupCache>,
+    }
+
+    #[async_trait]
+    impl RequestBuilderTrait for TouchTestRequestBuilder {
+        async fn make_request(
+            &self,
+            _http_client: &reqwest::Client,
+            _request_context: &Arc<AuthorizedRequestContext>,
+            _lcut: u64,
+        ) -> Result<RequestBuilderOutcome, reqwest::Error> {
+            unreachable!("process_result does not make an HTTP request")
+        }
+
+        async fn is_an_update(
+            &self,
+            _body: &[u8],
+            _headers: &reqwest::header::HeaderMap,
+            _request_context: &Arc<AuthorizedRequestContext>,
+        ) -> bool {
+            false
+        }
+
+        fn get_observers(&self) -> Arc<HttpDataProviderObserver> {
+            Arc::new(HttpDataProviderObserver::new())
+        }
+
+        fn get_backup_cache(&self) -> Arc<dyn HttpDataProviderObserverTrait + Sync + Send> {
+            self.backup_cache.clone()
+        }
+
+        async fn should_make_request(
+            &self,
+            _request_context: &Arc<AuthorizedRequestContext>,
+        ) -> bool {
+            true
+        }
     }
 
     async fn run_test_tasks_streaming<F, Fut>(
@@ -656,6 +798,49 @@ mod tests {
             .expect("equivalent request context should map to same lock")
             .clone();
         assert!(Arc::ptr_eq(&fetched, &lock));
+    }
+
+    #[tokio::test]
+    async fn no_data_dispatches_a_non_blocking_backup_cache_touch() {
+        let backup_cache = Arc::new(BlockingBackupCache {
+            touch_count: AtomicUsize::new(0),
+            touch_started: Notify::new(),
+            release_touch: Notify::new(),
+        });
+        let request_builder: Arc<dyn RequestBuilderTrait> = Arc::new(TouchTestRequestBuilder {
+            backup_cache: Arc::clone(&backup_cache),
+        });
+        let request_context = Arc::new(FullRequestContext {
+            authorized_request_context: test_request_context(),
+        });
+        let result = DataProviderResult {
+            result: DataProviderRequestResult::NoDataAvailable,
+            body: None,
+            lcut: 123,
+        };
+
+        let handled = tokio::time::timeout(
+            Duration::from_millis(100),
+            BackgroundDataProvider::process_result(
+                result,
+                request_builder,
+                &request_context,
+                123,
+                false,
+            ),
+        )
+        .await
+        .expect("a blocked cache touch must not block the successful origin result");
+
+        assert_eq!(handled, DataProviderRequestResult::NoDataAvailable);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            backup_cache.touch_started.notified(),
+        )
+        .await
+        .expect("the NoDataAvailable path should dispatch a cache touch");
+        assert_eq!(backup_cache.touch_count.load(Ordering::SeqCst), 1);
+        backup_cache.release_touch.notify_one();
     }
 
     #[test]

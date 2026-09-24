@@ -14,6 +14,7 @@ use crate::{
     },
     servers::{
         authorized_request_context::AuthorizedRequestContext, normalized_path::NormalizedPath,
+        sdk_key_normalizer::sdk_key_prefix,
     },
     utils::compress_encoder::encoding_priority,
 };
@@ -31,6 +32,13 @@ pub trait HttpDataProviderObserverTrait {
         &self,
         request_context: &Arc<AuthorizedRequestContext>,
     ) -> Option<Arc<ConfigSpecForCompany>>;
+
+    /// Confirms the cached entry for this key is still current, without rewriting it.
+    ///
+    /// The poller calls this when the origin reports no update, which is the only signal that an
+    /// unchanged config is still live. Implementations that expire their entries need it to keep
+    /// a stable config from aging out; everything else can ignore it.
+    async fn touch(&self, _request_context: &Arc<AuthorizedRequestContext>) {}
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -49,6 +57,11 @@ pub enum ProxyEventType {
     RedisCacheReadSucceed,
     RedisCacheReadMiss,
     RedisCacheWriteSkipped,
+    RedisCacheTtlRefreshed,
+    /// `EXPIRE` found no key, so the entry had already been evicted and the backup cache is
+    /// empty for it. Worth alerting on: it means a fallback that was assumed present is gone.
+    RedisCacheTtlRefreshMissed,
+    RedisCacheTtlRefreshFailed,
     RedisCacheDeleteSucceed,
     RedisCacheDeleteFailed,
     RedisCacheReadFailed,
@@ -64,6 +77,7 @@ pub enum ProxyEventType {
     GrpcEstimatedActiveStreams,
     StreamingChannelGotNewData,
     UpdateConfigSpecStorePropagationDelayMs,
+    ConfigSpecCurrentLcut,
     LogEventStoreDeduped,
     LogEventStoreDedupeCacheCleared,
     NginxCacheBytesUsed,
@@ -93,6 +107,13 @@ impl std::fmt::Display for ProxyEventType {
             ProxyEventType::RedisCacheReadSucceed => write!(f, "RedisCacheReadSucceed"),
             ProxyEventType::RedisCacheReadMiss => write!(f, "RedisCacheReadMiss"),
             ProxyEventType::RedisCacheWriteSkipped => write!(f, "RedisCacheWriteSkipped"),
+            ProxyEventType::RedisCacheTtlRefreshed => write!(f, "RedisCacheTtlRefreshed"),
+            ProxyEventType::RedisCacheTtlRefreshMissed => {
+                write!(f, "RedisCacheTtlRefreshMissed")
+            }
+            ProxyEventType::RedisCacheTtlRefreshFailed => {
+                write!(f, "RedisCacheTtlRefreshFailed")
+            }
             ProxyEventType::RedisCacheDeleteSucceed => write!(f, "RedisCacheDeleteSucceed"),
             ProxyEventType::RedisCacheDeleteFailed => write!(f, "RedisCacheDeleteFailed"),
             ProxyEventType::RedisCacheReadFailed => write!(f, "RedisCacheReadFailed"),
@@ -122,6 +143,7 @@ impl std::fmt::Display for ProxyEventType {
             ProxyEventType::UpdateConfigSpecStorePropagationDelayMs => {
                 write!(f, "UpdateConfigSpecStorePropagationDelayMs")
             }
+            ProxyEventType::ConfigSpecCurrentLcut => write!(f, "ConfigSpecCurrentLcut"),
             ProxyEventType::LogEventStoreDeduped => write!(f, "LogEventStoreDeduped"),
             ProxyEventType::LogEventStoreDedupeCacheCleared => {
                 write!(f, "LogEventStoreDedupeCacheCleared")
@@ -210,13 +232,7 @@ impl ProxyEvent {
                 if let Some(cached_key) = cache.get(&rc.sdk_key) {
                     cached_key.clone()
                 } else {
-                    let new_key: Arc<str> = if rc.sdk_key.len() > 20 {
-                        let mut truncated = rc.sdk_key[..20].to_string();
-                        truncated.push_str("***");
-                        Arc::from(truncated)
-                    } else {
-                        Arc::from(rc.sdk_key.as_str())
-                    };
+                    let new_key: Arc<str> = Arc::from(sdk_key_prefix(&rc.sdk_key).as_ref());
                     cache.insert(rc.sdk_key.to_string(), new_key.clone());
                     new_key
                 }

@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 pub mod datastore;
 pub mod datatypes;
 pub mod observers;
+pub mod otlp;
 pub mod utils;
 
 pub mod servers {

@@ -202,6 +202,9 @@ if ! nginx -t -g 'pid /tmp/nginx.pid;' -c "$NGINX_CONF" >/dev/null 2>&1; then
     exit 1
 fi
 
-nginx -g 'pid /tmp/nginx.pid;' -c "$NGINX_CONF" > /dev/null 2>&1 &
+# Keep stdout attached to the container. daemon off prevents nginx from
+# replacing its inherited descriptors when it backgrounds itself.
+# Native nginx errors can include unredacted request URLs; keep stderr suppressed.
+nginx -g 'daemon off; pid /tmp/nginx.pid;' -c "$NGINX_CONF" 2>/dev/null &
 
 exec statsig_forward_proxy "$@"
