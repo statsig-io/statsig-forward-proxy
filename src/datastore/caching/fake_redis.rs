@@ -1,8 +1,8 @@
 //! A minimal in-process Redis stand-in for tests.
 //!
 //! It speaks just enough RESP to let a real redis-rs client complete its handshake: it parses
-//! inbound command arrays, records them, answers `PING` with `+PONG` and everything else with
-//! `+OK`. That is enough to assert the exact `AUTH` arguments each auth mode puts on the wire,
+//! inbound command arrays, records them, and returns canned replies for `PING`, `EXPIRE`,
+//! and `EVAL` (without executing Lua), with `+OK` for other commands. That is enough to assert the exact `AUTH` arguments each auth mode puts on the wire,
 //! which is otherwise only observable against a live Redis.
 
 use std::sync::Arc;
@@ -23,6 +23,13 @@ pub struct FakeRedis {
 
 impl FakeRedis {
     pub async fn start() -> Self {
+        Self::start_with_expire_reply(1).await
+    }
+
+    /// `EXPIRE` and `EVAL` answer with `expire_reply` instead of `+OK`. This controls
+    /// result classification and wire assertions; the opt-in real-Redis regression verifies
+    /// the script itself, including mismatched versions.
+    pub async fn start_with_expire_reply(expire_reply: i64) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let port = listener.local_addr().expect("local addr").port();
         let commands = Arc::new(Mutex::new(Vec::new()));
@@ -32,7 +39,12 @@ impl FakeRedis {
             while let Ok((socket, _)) = listener.accept().await {
                 let recorded = Arc::clone(&recorded);
                 let (read_half, write_half) = socket.into_split();
-                tokio::spawn(serve(BufReader::new(read_half), write_half, recorded));
+                tokio::spawn(serve(
+                    BufReader::new(read_half),
+                    write_half,
+                    recorded,
+                    expire_reply,
+                ));
             }
         });
 
@@ -44,15 +56,28 @@ impl FakeRedis {
         self.commands.lock().clone()
     }
 
+    pub fn clear_commands(&self) {
+        self.commands.lock().clear();
+    }
+
     /// Just the `AUTH` commands, which is what the auth modes differ on.
     pub fn auth_commands(&self) -> Vec<Vec<String>> {
+        self.commands_named("AUTH")
+    }
+
+    /// Atomic TTL refresh scripts. This fake records arguments but does not execute Lua.
+    pub fn refresh_commands(&self) -> Vec<Vec<String>> {
+        self.commands_named("EVAL")
+    }
+
+    fn commands_named(&self, name: &str) -> Vec<Vec<String>> {
         self.commands
             .lock()
             .iter()
             .filter(|command| {
                 command
                     .first()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("AUTH"))
+                    .is_some_and(|first| first.eq_ignore_ascii_case(name))
             })
             .cloned()
             .collect()
@@ -70,11 +95,13 @@ async fn serve(
     mut reader: BufReader<OwnedReadHalf>,
     mut writer: OwnedWriteHalf,
     commands: Arc<Mutex<Vec<Vec<String>>>>,
+    expire_reply: i64,
 ) {
     while let Some(command) = read_command(&mut reader).await {
         let reply = match command.first().map(|name| name.to_ascii_uppercase()) {
-            Some(name) if name == "PING" => "+PONG\r\n",
-            _ => "+OK\r\n",
+            Some(name) if name == "PING" => "+PONG\r\n".to_string(),
+            Some(name) if name == "EXPIRE" || name == "EVAL" => format!(":{expire_reply}\r\n"),
+            _ => "+OK\r\n".to_string(),
         };
         commands.lock().push(command);
         if writer.write_all(reply.as_bytes()).await.is_err() {

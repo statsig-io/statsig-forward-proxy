@@ -11,6 +11,18 @@ http {
     tcp_nodelay on;
 
     error_log /dev/stderr error;
+    # Log only known route names, never raw URLs, query strings, or headers.
+    # This also protects malformed/unmatched paths and repeated/encoded k args.
+    map $uri $access_log_path {
+        default "[REDACTED]";
+        ~^/(?<access_log_route>v[12]/(?:download_config_specs(?:_deltas)?|download_id_list_file))/ "/$access_log_route/[REDACTED]";
+        ~^/(?:v[12]/(?:download_config_specs|download_config_specs_deltas|get_id_lists|log_event|health|ready|startup))$ $uri;
+    }
+    log_format redacted '$remote_addr - - [$time_local] '
+                        '"$request_method $access_log_path $server_protocol" '
+                        '$status $body_bytes_sent "-" "-"';
+    access_log /dev/stdout redacted;
+
     proxy_cache_path {{PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m manager_files={{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}} manager_threshold={{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}} manager_sleep={{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}} inactive=30s use_temp_path=off;
     proxy_cache_path {{PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_id_list_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m manager_files={{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}} manager_threshold={{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}} manager_sleep={{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}} inactive=20m use_temp_path=off;
     # Normalize supported Accept-Encoding tokens into stable cache-key variants.

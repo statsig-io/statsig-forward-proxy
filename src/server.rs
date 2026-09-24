@@ -39,6 +39,7 @@ use observers::HttpDataProviderObserverTrait;
 use std::sync::Arc;
 use std::time::Duration;
 
+use utils::sdk_key_redacting_logger::{install_sdk_key_redacting_logger, rocket_log_level_filter};
 use uuid::Uuid;
 
 use lazy_static::lazy_static;
@@ -82,6 +83,9 @@ pub struct Cli {
     maximum_concurrent_sdk_keys: u16,
     #[clap(short, long, default_value = "10")]
     polling_interval_in_s: u64,
+    // Set to zero to disable the metric.
+    #[clap(long, default_value = "60")]
+    config_spec_current_lcut_sampling_interval_in_s: u64,
     #[clap(short = 'u', long, alias = "update-batch-size", default_value = "64")]
     max_in_flight: u64,
     /// Adds a minimum delay between background request launches to reduce
@@ -453,6 +457,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let overrides = envy::from_env::<ConfigurationAndOverrides>().expect("Envy Error");
 
+    // Rocket only installs its own logger when none is set, so this must happen before
+    // any Rocket instance launches. It keeps Rocket's output shape but redacts SDK keys.
+    // Abort rather than start with whichever logger got there first, since that logger
+    // would receive Rocket's unmatched-route lines with full SDK keys.
+    install_sdk_key_redacting_logger(rocket_log_level_filter())
+        .map_err(|error| format!("[SFP] Failed to install SDK key redacting logger: {error}"))?;
+
     println!("[SFP] Checking to initialize Statsig SDK and Profiling...");
     try_initialize_statsig_sdk_and_profiling(&cli, &overrides).await;
 
@@ -632,6 +643,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_event_store = create_log_event_store(http_client.clone(), &overrides).await;
 
     nginx_cache_monitor::NginxCacheMonitor::start_monitoring().await;
+    if cli.config_spec_current_lcut_sampling_interval_in_s > 0 {
+        config_spec_store.start_lcut_monitoring(Duration::from_secs(
+            cli.config_spec_current_lcut_sampling_interval_in_s,
+        ));
+    }
 
     println!("[SFP] Initializing Servers...");
     match cli.mode {
@@ -749,6 +765,39 @@ mod tests {
         let cli = Cli::parse_from(["server", "http", "disabled", "--update-batch-size", "32"]);
 
         assert_eq!(cli.max_in_flight, 32);
+    }
+
+    #[test]
+    fn cli_configures_config_spec_current_lcut_sampling_interval() {
+        let default_cli = Cli::parse_from(["server", "http", "disabled"]);
+        assert_eq!(
+            default_cli.config_spec_current_lcut_sampling_interval_in_s,
+            60
+        );
+
+        let overridden_cli = Cli::parse_from([
+            "server",
+            "http",
+            "disabled",
+            "--config-spec-current-lcut-sampling-interval-in-s",
+            "15",
+        ]);
+        assert_eq!(
+            overridden_cli.config_spec_current_lcut_sampling_interval_in_s,
+            15
+        );
+
+        let disabled_cli = Cli::parse_from([
+            "server",
+            "http",
+            "disabled",
+            "--config-spec-current-lcut-sampling-interval-in-s",
+            "0",
+        ]);
+        assert_eq!(
+            disabled_cli.config_spec_current_lcut_sampling_interval_in_s,
+            0
+        );
     }
 
     #[test]

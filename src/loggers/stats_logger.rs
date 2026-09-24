@@ -20,7 +20,8 @@ use crate::observers::OperationType;
 use fxhash::FxHashMap;
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::{global, KeyValue};
-use opentelemetry_otlp::{ExporterBuildError, MetricExporter, Protocol, WithExportConfig};
+use opentelemetry_otlp::Protocol;
+use statsig_forward_proxy::otlp::build_metrics_exporter;
 
 use smallvec::SmallVec;
 
@@ -608,7 +609,12 @@ struct OTLPLogger {
 
 impl OTLPLogger {
     pub fn new() -> Option<Self> {
-        Self::build_metrics_exporter()
+        let protocol = match CONFIG.otel_exporter_otlp_protocol.as_deref() {
+            Some("grpc") => Protocol::Grpc,
+            Some("http/protobuf") => Protocol::HttpBinary,
+            _ => Protocol::HttpJson,
+        };
+        build_metrics_exporter(protocol, CONFIG.otel_exporter_endpoint.as_deref())
             .ok()
             .map(|e| {
                 let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
@@ -623,33 +629,6 @@ impl OTLPLogger {
                 gauge_map: RwLock::new(FxHashMap::default()),
                 histogram_map: RwLock::new(FxHashMap::default()),
             })
-    }
-
-    fn build_metrics_exporter() -> Result<MetricExporter, ExporterBuildError> {
-        let otlp_protocol = CONFIG
-            .otel_exporter_otlp_protocol
-            .clone()
-            .unwrap_or("http/json".to_string());
-        if otlp_protocol == "grpc" {
-            let mut exporter_builder = opentelemetry_otlp::MetricExporter::builder()
-                .with_tonic()
-                .with_protocol(Protocol::Grpc);
-            if let Some(e) = &CONFIG.otel_exporter_endpoint {
-                exporter_builder = exporter_builder.with_endpoint(e);
-            }
-            exporter_builder.build()
-        } else {
-            let mut exporter_builder = opentelemetry_otlp::MetricExporter::builder().with_http();
-            if otlp_protocol == "http/protobuf" {
-                exporter_builder = exporter_builder.with_protocol(Protocol::HttpBinary);
-            } else {
-                exporter_builder = exporter_builder.with_protocol(Protocol::HttpJson);
-            }
-            if let Some(e) = &CONFIG.otel_exporter_endpoint {
-                exporter_builder = exporter_builder.with_endpoint(e);
-            }
-            exporter_builder.build()
-        }
     }
 
     fn send_histogram_event(&self, event: &Operation) {

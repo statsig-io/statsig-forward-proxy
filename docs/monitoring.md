@@ -13,6 +13,7 @@ The forward proxy comes pre-built with a few different options for monitoring:
 1. **--statsig-logging**: With configuration, send your metrics to Statsig and monitor through our dashboards and metric explorer capabilities.
 1. **--statsd-logging**: With configuration, utilize the [open standard](https://github.com/statsd/statsd/blob/master/docs/metric_types.md) to emit metrics to a UDS or UDP socket.
 1. **--datadog-logging**: Same as statsd, except replaces the timing metric with datadog's proprietary distribution metric.
+1. **--otlp-logging**: Export metrics over OTLP to an OpenTelemetry-compatible backend.
 
 If you'd like support for anything else, feel free to submit an issue or post in our slack channel.
 
@@ -63,6 +64,27 @@ Along with this, we offer more advance configuration, feel free to send us a mes
 - dogstatsd_max_retry_attempt: This determines the maximum number of retry attempts for sending statsd metrics.
 - dogstatsd_initial_retry_delay: This sets the initial delay in milliseconds before the first retry attempt, allowing for temporary issues to resolve before retrying.
 - datadog_sender_buffer_size: This sets the size of the buffer for the channel sending metrics to the statsd client.
+
+### OTLP Logging
+
+To export metrics over OTLP, configure the exporter endpoint and protocol, then pass the OTLP logging flag:
+
+```
+OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318" \
+OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf" \
+statsig-forward-proxy http disabled --otlp-logging
+```
+
+OTLP metrics use cumulative temporality by default. Backends that expect delta metrics can use the standard OpenTelemetry temporality preference:
+
+```
+OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318" \
+OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf" \
+OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE="delta" \
+statsig-forward-proxy http disabled --otlp-logging
+```
+
+Accepted temporality values are `cumulative`, `delta`, and `lowmemory`.
 
 ## Types of Events Emitted
 
@@ -284,6 +306,16 @@ We emit a number of events that allow you to monitor and ensure that the forward
   - lcut, also known as last config update time, lets you know the timestamp of when the served configuration was generated
 - **Is it working?**: This should match one-to-one with your project configuration updates. P99 is expected to be around 30s after taking into account all our caching layers.
 
+### ConfigSpecCurrentLcut
+
+- **Description**: Reports the oldest config version currently served from the in-memory config spec store for each sdk_key and path on the configured sampling interval, even when that version has not changed.
+- **Event Unit Type**: Gauge containing the lcut timestamp in milliseconds
+- **Useful Dimensions**: path, sdk_key
+- **How to Interpret**:
+  - Compare the latest value across proxy instances to detect instances serving an older config version.
+  - Unlike `UpdateConfigSpecStorePropagationDelayMs`, this metric is emitted after the initial config load and continues while an instance is idle.
+- **Is it working?**: Each loaded sdk_key and path should report its currently served lcut on `--config-spec-current-lcut-sampling-interval-in-s` (60 seconds by default). Set the interval to `0` to disable this metric.
+
 ### NginxCacheBytesUsed
 
 - **Description**: Represents the total amount of data currently stored across the nginx caches
@@ -304,12 +336,13 @@ We emit a number of events that allow you to monitor and ensure that the forward
 
 ### What are the most important metrics to monitor?
 
-HttpServerRequestSuccess, HttpServerRequestFailed, HttpDataProviderGotData, and UpdateConfigSpecStorePropagationDelayMs.
+HttpServerRequestSuccess, HttpServerRequestFailed, HttpDataProviderGotData, UpdateConfigSpecStorePropagationDelayMs, and ConfigSpecCurrentLcut.
 
 These allow you to ensure:
 - the proxy is servicing requests
 - the proxy is getting updates
 - the proxy is receiving timely updates
+- each proxy instance continues serving a current config version while idle
 
 ### What does this mean? [SFP] Dropping event... Buffer limit hit...
 
