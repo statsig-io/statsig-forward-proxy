@@ -454,6 +454,13 @@ async fn maybe_create_deltas_store(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env::set_var("RUST_BACKTRACE", "1");
 
+    // Redis TLS uses rustls's process default, but dependencies enable both crypto providers.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("Failed to install rustls crypto provider");
+    }
+
     let cli = Cli::parse();
     let overrides = envy::from_env::<ConfigurationAndOverrides>().expect("Envy Error");
 
