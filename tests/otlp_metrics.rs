@@ -82,9 +82,13 @@ async fn receive_export(
 }
 
 async fn assert_export_starts_tls_handshake(protocol: Protocol) {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!(
-        "https://localhost:{}",
+        "https://127.0.0.1:{}",
         listener.local_addr().unwrap().port()
     );
     let handshake = tokio::spawn(async move {
@@ -123,8 +127,10 @@ async fn assert_export_starts_tls_handshake(protocol: Protocol) {
         .build()
         .add(1, &[]);
 
-    let _ = meter_provider.force_flush();
-    let tls_record_header = handshake.await.unwrap();
+    let flush_result = meter_provider.force_flush();
+    let tls_record_header = handshake.await.unwrap_or_else(|error| {
+        panic!("TLS handshake failed after export {flush_result:?}: {error}")
+    });
     assert_eq!(tls_record_header, [0x16, 0x03]);
     let _ = meter_provider.shutdown();
 }
