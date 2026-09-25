@@ -20,6 +20,7 @@ futures = "0.3.31"
 envy = "0.4.2"
 serde = { version = "1.0.219", features = ["derive"] }
 redis = { version = "0.32.3", features = ["tokio-rustls-comp", "tokio-comp"] }
+rustls = { version = "0.23.28", default-features = false, features = ["ring", "std"] }
 bb8 = { version = "0.9.0" }
 bb8-redis = { version = "0.24.0" }
 async-trait = "0.1.88"
