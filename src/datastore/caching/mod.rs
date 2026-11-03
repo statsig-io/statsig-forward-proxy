@@ -3,3 +3,4 @@ pub mod disabled_cache;
 pub mod fake_redis;
 pub mod redis_auth;
 pub mod redis_cache;
+pub mod redis_pool;

@@ -6,5 +6,6 @@ pub mod id_list_file_refresh_observer;
 pub mod id_list_file_store;
 pub mod id_list_manifest;
 pub mod id_list_store;
+pub mod idlist_membership;
 pub mod log_event_store;
 pub mod sdk_key_store;

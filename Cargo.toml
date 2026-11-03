@@ -1,6 +1,6 @@
 [package]
 name = "statsig-forward-proxy"
-version = "4.6.0"
+version = "4.8.0"
 edition = "2021"
 rust-version = "1.94.0"
 license = "ISC"
@@ -15,7 +15,7 @@ protobuf = "3.7.2"
 prost = "0.13.2"
 rocket = { version = "0.5.1", features = ["json"] }
 tokio = { version = "1.46.0", features = ["full"] }
-reqwest = { version = "0.12.28", default-features = false, features = ["http3", "rustls-tls"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["http3", "rustls-tls", "stream"] }
 futures = "0.3.31"
 envy = "0.4.2"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -62,6 +62,8 @@ tonic-build = "0.13.1"
 
 [dev-dependencies]
 criterion = "0.5.1"
+rcgen = "0.13.2"
+webpki-roots = "1.0.11"
 opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["gen-tonic", "metrics"] }
 tempfile = "3.20.0"
 temp-env = "0.3.6"

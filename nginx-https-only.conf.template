@@ -21,7 +21,12 @@ http {
     log_format redacted '$remote_addr - - [$time_local] '
                         '"$request_method $access_log_path $server_protocol" '
                         '$status $body_bytes_sent "-" "-"';
-    access_log /dev/stdout redacted;
+    map "{{NGINX_ACCESS_LOG}}:$status" $access_log_enabled {
+        ~^off:         0;
+        ~^errors:[23]  0;
+        default        1;
+    }
+    access_log /dev/stdout redacted if=$access_log_enabled;
 
     proxy_cache_path {{PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m manager_files={{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}} manager_threshold={{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}} manager_sleep={{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}} inactive=30s use_temp_path=off;
     proxy_cache_path {{PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION}} levels=1:2 keys_zone=download_id_list_cache:10m max_size={{PROXY_CACHE_MAX_SIZE_IN_MB}}m manager_files={{PROXY_CACHE_CLEANUP_MAX_FILES_DELETED_PER_INTERVAL}} manager_threshold={{PROXY_CACHE_CLEANUP_MAX_DURATION_MS}} manager_sleep={{PROXY_CACHE_CLEANUP_SLEEP_INTERVAL_MS}} inactive=20m use_temp_path=off;
@@ -97,6 +102,17 @@ http {
         ssl_verify_depth 3;
 
         location /v1/log_event {
+            proxy_pass http://sfp_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache off;
+        }
+
+        location /v1/user_enrichment {
             proxy_pass http://sfp_backend;
             proxy_http_version 1.1;
             proxy_set_header Connection "";

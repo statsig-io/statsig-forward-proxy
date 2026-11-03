@@ -71,6 +71,14 @@ impl ProxyEventObserver {
         });
     }
 
+    #[cfg(test)]
+    pub(crate) fn subscribe() -> broadcast::Receiver<Arc<ProxyEvent>> {
+        PROXY_EVENT_OBSERVER
+            .has_observers
+            .store(true, Ordering::SeqCst);
+        PROXY_EVENT_OBSERVER.sender.subscribe()
+    }
+
     pub fn publish_event(event: ProxyEvent) {
         if PROXY_EVENT_OBSERVER.has_observers.load(Ordering::SeqCst) {
             if let Err(e) = PROXY_EVENT_OBSERVER.sender.send(Arc::new(event)) {

@@ -14,9 +14,15 @@ use datastore::data_providers::HttpClientConfig;
 use datastore::deltas_store::DeltasStore;
 use datastore::id_list_file_refresh_observer::IdListFileRefreshObserver;
 use datastore::id_list_file_store::IdListFileStore;
+use datastore::idlist_membership::namespaces::IdListNamespaces;
+use datastore::idlist_membership::{
+    self, idlist_sync_keys_from_env, register_server_keys_for_manifest_polling,
+    sync_interval_from_env, IdListKeySchema, IdListManifestObserver, IdListMembershipConfig,
+    IdListSyncProducer, IdListSyncWorker, IdListWorkerConfig, RedisWorkLock,
+};
 use datastore::log_event_store::LogEventStore;
 use datastore::{
-    caching::redis_cache,
+    caching::{redis_cache, redis_pool},
     data_providers::{
         background_data_provider, http_data_provider, startup_warmup_parser, OUTBOUND_USER_AGENT,
     },
@@ -32,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 use datastore::id_list_store::GetIdListStore;
 use servers::authorized_request_context::AuthorizedRequestContextCache;
+use servers::http_apis::user_enrichment_api::{UserEnrichmentConfig, UserEnrichmentService};
 use statsig::{Statsig, StatsigOptions};
 
 use observers::proxy_event_observer::ProxyEventObserver;
@@ -565,7 +572,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         CacheMode::Disabled => Arc::new(disabled_cache::DisabledCache::default()),
     };
+
+    // Idlist membership foundations (B1): schema + work-lock + pool, shared by B2/B3/B4.
+    let idlist_key_schema = Arc::new(IdListKeySchema::new(redis_pool::redis_key_prefix_from_env()));
+    let idlist_server_keys = idlist_sync_keys_from_env()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let idlist_features_enabled = idlist_server_keys.is_some();
+    let idlist_namespaces = Arc::new(IdListNamespaces::new(
+        idlist_server_keys.clone().unwrap_or_default(),
+    ));
+    let (idlist_redis_pool, idlist_work_lock): (
+        Option<redis_pool::RedisPool>,
+        Option<Arc<RedisWorkLock>>,
+    ) = match cli.cache {
+        CacheMode::Redis => {
+            match redis_pool::create_redis_pool_from_env(cli.redis_connection_timeout_in_s).await {
+                Ok(pool) => {
+                    let lock = Arc::new(RedisWorkLock::new(
+                        pool.clone(),
+                        idlist_membership::new_holder_id(),
+                    ));
+                    (Some(pool), Some(lock))
+                }
+                Err(e) => {
+                    eprintln!(
+                    "[SFP] Failed to create idlist membership Redis pool; syncer disabled. Error: {e}"
+                );
+                    (None, None)
+                }
+            }
+        }
+        CacheMode::Disabled => (None, None),
+    };
+    let user_enrichment_service = if idlist_features_enabled {
+        if cli.cache != CacheMode::Redis {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SFP_IDLIST_SYNC_KEYS_JSON requires Redis cache mode",
+            )
+            .into());
+        }
+        let endpoint_config = UserEnrichmentConfig::from_env()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        let membership_config = IdListMembershipConfig::from_env()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        let read_pool =
+            idlist_membership::create_idlist_read_pool_from_env(cli.redis_connection_timeout_in_s)
+                .await
+                .map_err(std::io::Error::other)?;
+        let service = UserEnrichmentService::from_redis(
+            Arc::clone(&idlist_namespaces),
+            (*idlist_key_schema).clone(),
+            read_pool,
+            membership_config,
+            endpoint_config,
+        )
+        .await
+        .map_err(std::io::Error::other)?;
+        println!(
+            "[SFP] User enrichment endpoint initialized for {} server key(s).",
+            idlist_server_keys.as_ref().map_or(0, Vec::len)
+        );
+        Some(service)
+    } else {
+        None
+    };
     let config_spec_observer = Arc::new(HttpDataProviderObserver::new());
+    if idlist_features_enabled {
+        config_spec_observer
+            .add_observer(idlist_namespaces.company_ids.clone())
+            .await;
+    }
     let config_spec_store = create_config_spec_store(
         &cli,
         &overrides,
@@ -595,6 +672,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ))))
             .await;
     }
+
+    // B2: prepare producer boot config (observer registered now; prime + loop after rc_cache).
+    let idlist_sync_boot: Option<(Vec<String>, Arc<RedisWorkLock>, redis_pool::RedisPool)> =
+        if idlist_features_enabled {
+            match (&idlist_redis_pool, &idlist_work_lock) {
+                (Some(pool), Some(work_lock)) => {
+                    let server_keys = idlist_server_keys
+                        .as_ref()
+                        .expect("keys parsed when sync is enabled")
+                        .clone();
+                    println!(
+                        "[SFP] Enabling idlist sync producer for {} server key(s)...",
+                        server_keys.len()
+                    );
+                    idlist_observer
+                        .add_observer(Arc::new(IdListManifestObserver::new(
+                            server_keys.clone(),
+                            Arc::clone(&idlist_namespaces.manifests),
+                        )))
+                        .await;
+                    Some((server_keys, Arc::clone(work_lock), pool.clone()))
+                }
+                _ => {
+                    eprintln!(
+                        "[SFP] SFP_IDLIST_SYNC_KEYS_JSON requires Redis cache mode and a healthy idlist Redis pool; syncer disabled"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
     let deltas_runtime = maybe_create_deltas_store(
         &cli,
         &overrides,
@@ -628,6 +737,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let background_runtime_handle = background_runtime.handle();
 
+    if idlist_features_enabled {
+        // Unlike the elected B2 producer, every pod starts exactly one worker.
+        // Per-list Redis claims provide fleet-wide exclusion while allowing different
+        // pods to process different lists concurrently.
+        match (idlist_redis_pool, idlist_work_lock) {
+            (Some(pool), Some(claim)) => {
+                let worker_config = IdListWorkerConfig::from_env().map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
+                })?;
+                let worker_http = reqwest::Client::builder()
+                    .user_agent(OUTBOUND_USER_AGENT)
+                    .timeout(Duration::from_secs(cli.http_request_timeout_in_s))
+                    .read_timeout(Duration::from_secs(cli.http_read_timeout_in_s))
+                    .connect_timeout(Duration::from_secs(cli.http_connect_timeout_in_s))
+                    .pool_idle_timeout(Duration::from_secs(
+                        cli.http_connection_pool_idle_timeout_in_s,
+                    ))
+                    .pool_max_idle_per_host(cli.http_connection_pool_max_idle_per_host)
+                    .build()?;
+                let worker = Arc::new(IdListSyncWorker::new(
+                    (*idlist_key_schema).clone(),
+                    claim,
+                    pool,
+                    worker_http,
+                    worker_config,
+                ));
+                worker.spawn_loop(
+                    &background_runtime_handle,
+                    GRACEFUL_SHUTDOWN_TOKEN.clone(),
+                );
+                println!("[SFP] Idlist reverse-index worker loop started.");
+            }
+            _ => eprintln!(
+                "[SFP] SFP_IDLIST_SYNC_KEYS_JSON requires Redis cache mode and a healthy idlist Redis pool; worker disabled"
+            ),
+        }
+    }
+
     println!("[SFP] Starting background thread...");
     background_data_provider
         .start_background_thread(warmup_store_items, &background_runtime_handle)
@@ -638,6 +785,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     }
     let rc_cache = Arc::new(AuthorizedRequestContextCache::new());
+
+    if idlist_features_enabled {
+        Arc::clone(&idlist_namespaces.company_ids).spawn_discovery(
+            &background_runtime_handle,
+            Arc::clone(&rc_cache),
+            Arc::clone(&background_data_provider),
+            GRACEFUL_SHUTDOWN_TOKEN.clone(),
+        );
+    }
+
+    if let Some((server_keys, work_lock, pool)) = idlist_sync_boot {
+        // Start the producer only after request contexts are registered, ensuring its
+        // first manifest refresh can populate the observer consumed by the first tick.
+        register_server_keys_for_manifest_polling(&server_keys, &rc_cache, &id_list_store).await;
+        let interval_s = sync_interval_from_env();
+        let enable_reverse_index = idlist_membership::reverse_index_enabled_from_env()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        let producer = Arc::new(
+            IdListSyncProducer::with_namespaces(
+                (*idlist_key_schema).clone(),
+                work_lock,
+                pool,
+                Arc::clone(&idlist_namespaces),
+                interval_s,
+            )
+            .with_reverse_index_enabled(enable_reverse_index),
+        );
+        producer.spawn_loop(GRACEFUL_SHUTDOWN_TOKEN.clone());
+        println!(
+            "[SFP] Idlist sync producer loop started (interval={interval_s}s, attempt every {}s)",
+            idlist_membership::producer_attempt_interval_s(interval_s)
+        );
+    }
+
     // Default buffer size is 20000 messages
     let http_client = reqwest::Client::builder()
         .user_agent(OUTBOUND_USER_AGENT)
@@ -678,6 +859,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     id_list_file_store,
                     rc_cache,
                     sdk_key_store: sdk_key_store.clone(),
+                    user_enrichment_service: user_enrichment_service.clone(),
                 },
             )
             .await?
@@ -699,6 +881,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     id_list_file_store,
                     rc_cache,
                     sdk_key_store: sdk_key_store.clone(),
+                    user_enrichment_service,
                 },
             );
             join!(async { grpc_server.await.ok() }, async {

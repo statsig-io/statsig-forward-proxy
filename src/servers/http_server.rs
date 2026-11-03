@@ -14,6 +14,7 @@ use crate::datatypes::log_event::LogEventRequest;
 use crate::datatypes::log_event::LogEventResponse;
 use crate::http_data_provider::ResponsePayload;
 use crate::servers::http_apis;
+use crate::servers::http_apis::user_enrichment_api::UserEnrichmentService;
 use crate::servers::request_logging_fairing::{
     RequestLoggingRequestFairing, RequestLoggingResponseFairing,
 };
@@ -619,6 +620,7 @@ pub struct HttpServerDependencies {
     pub id_list_file_store: Arc<IdListFileStore>,
     pub rc_cache: Arc<AuthorizedRequestContextCache>,
     pub sdk_key_store: Arc<SdkKeyStore>,
+    pub user_enrichment_service: Option<Arc<UserEnrichmentService>>,
 }
 impl HttpServer {
     pub async fn start_server(
@@ -633,10 +635,11 @@ impl HttpServer {
             id_list_file_store,
             rc_cache,
             sdk_key_store,
+            user_enrichment_service,
         } = deps;
         let sdk_key_cache = SdkKeyCache(RwLock::new(HashMap::new()));
 
-        rocket::build()
+        let mut rocket = rocket::build()
             .mount(
                 "/v1",
                 routes![
@@ -670,9 +673,13 @@ impl HttpServer {
             .attach(RequestLoggingRequestFairing)
             .attach(sdk_key_normalization_fairing())
             .attach(RequestLoggingResponseFairing)
-            .register("/", catchers![default_catcher])
-            .launch()
-            .await?;
+            .register("/", catchers![default_catcher]);
+        if let Some(service) = user_enrichment_service {
+            rocket = rocket
+                .manage(service)
+                .mount("/v1", http_apis::user_enrichment_api::endpoint_routes(true));
+        }
+        rocket.launch().await?;
         Ok(())
     }
 }
