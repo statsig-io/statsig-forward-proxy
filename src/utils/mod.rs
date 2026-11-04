@@ -1,8 +1,6 @@
-// Leaving code because it works well; but less performant
-// We might want to try using it again one day
-// pub mod rate_limiter;
 pub mod compress_encoder;
 pub mod deserialization_helpers;
+pub mod rate_limiter;
 pub mod request_helper;
 pub mod response_compression;
 pub mod sdk_key_redacting_logger;

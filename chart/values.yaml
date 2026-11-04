@@ -140,6 +140,7 @@ sfp:
   # prefer `sfp.secrets` or `sfp.envFromSecret` for production deployments.
   environment: {}
     # STATSIG_ENDPOINT: "https://api.statsigcdn.com"
+    # NGINX_ACCESS_LOG: "errors" # all, errors (default), or off
     # For local/dev only:
     # SFP_STARTUP_WARMUP_KEYS_JSON: >-
     #   [{"sdk_key":"secret-client-key","path":"/v1/download_config_specs","encodings":["gzip"]}]

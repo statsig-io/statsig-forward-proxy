@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the real entrypoint and all nginx templates with synthetic credentials.
+"""Exercise access-log modes through the real entrypoint and all nginx templates.
 
 Requires nginx and openssl on PATH. Only filesystem paths and listening/upstream
 ports are changed in temporary copies; production rendering and launch logic run
@@ -35,6 +35,8 @@ CASES = [
     (f"/v2/download_config_specs/../{SECRET}", "[REDACTED]"),
     (f"/unknown/{SECRET}?k={SECRET}", "[REDACTED]"),
     (f"/v2/download_config_specs{SECRET}", "[REDACTED]"),
+    ("/upstream-success", "[REDACTED]"),
+    ("/upstream-redirect", "[REDACTED]"),
 ]
 
 
@@ -46,7 +48,13 @@ class Upstream(BaseHTTPRequestHandler):
         if self.path.startswith("/upstream-error/"):
             self.close_connection = True
             return
-        self.send_response(404 if self.path.startswith("/unknown/") else 200)
+        # Answer known routes with a non-cacheable 4xx; 5xx could be stale-served.
+        if self.path == "/upstream-success":
+            self.send_response(200)
+        elif self.path == "/upstream-redirect":
+            self.send_response(302)
+        else:
+            self.send_response(404 if self.path.startswith("/unknown/") else 429)
         self.send_header("Content-Length", "2")
         self.end_headers()
         self.wfile.write(b"ok")
@@ -73,7 +81,7 @@ def wait_for_port(port, process):
     raise AssertionError("nginx did not start")
 
 
-def run_mode(mode, upstream_port, nginx):
+def run_mode(mode, upstream_port, nginx, access_log):
     with tempfile.TemporaryDirectory(prefix="sfp-access-log-") as tmp:
         work = Path(tmp)
         http_port, https_port = free_port(), free_port()
@@ -109,6 +117,9 @@ def run_mode(mode, upstream_port, nginx):
         # Avoid inheriting caller-specific cache paths into the test fixture.
         env["PROXY_CACHE_DOWNLOAD_PATH_CONFIGURATION"] = str(work / "cache/download")
         env["PROXY_CACHE_DOWNLOAD_ID_LIST_PATH_CONFIGURATION"] = str(work / "cache/id-list")
+        env.pop("NGINX_ACCESS_LOG", None)
+        if access_log is not None:
+            env["NGINX_ACCESS_LOG"] = access_log
         args = ["sh", str(work / "entrypoint.sh")]
         if mode != "http-only":
             args += ["--x509-server-cert-path", str(cert), "--x509-server-key-path", str(key),
@@ -139,25 +150,34 @@ def run_mode(mode, upstream_port, nginx):
                         })
                         response = conn.getresponse()
                         status = response.status
-                        expected = 502 if path.startswith("/upstream-error/") else (
-                            404 if path.startswith("/unknown/") else 200)
+                        expected = {"/upstream-success": 200, "/upstream-redirect": 302}.get(path, 429)
+                        if path.startswith("/upstream-error/"):
+                            expected = 502
+                        elif path.startswith("/unknown/"):
+                            expected = 404
                         assert status == expected, status
                         body = response.read()
                         if status != 502:
                             assert body == b"ok"
                         conn.close()
-                        for _ in range(100):
-                            lines = stdout.read_text().splitlines()
-                            if len(lines) > before:
-                                break
-                            time.sleep(0.01)
-                        assert len(lines) == before + 1, (path, lines)
-                        assert f'"GET {safe_path} HTTP/1.1" {status} {len(body)} "-" "-"' in lines[-1], lines[-1]
+                        should_log = access_log == "all" or (
+                            access_log != "off" and not 200 <= status < 400)
+                        if should_log:
+                            for _ in range(100):
+                                lines = stdout.read_text().splitlines()
+                                if len(lines) > before:
+                                    break
+                                time.sleep(0.01)
+                            assert len(lines) == before + 1, (path, access_log, lines)
+                            assert f'"GET {safe_path} HTTP/1.1" {status} {len(body)} "-" "-"' in lines[-1], lines[-1]
+                            assert "?" not in lines[-1], lines[-1]
+                        else:
+                            time.sleep(0.2)
+                            assert len(stdout.read_text().splitlines()) == before, (path, access_log)
                         assert SECRET not in stdout.read_text() + stderr.read_text()
                         assert "synthetic-secret" not in stdout.read_text()
-                        assert "?" not in lines[-1], lines[-1]
                 assert (work / "nginx.pid").exists(), "nginx master did not stay running"
-                print(f"PASS {mode}: {len(listeners) * len(CASES)} requests via entrypoint stdout (uid={os.getuid()})")
+                print(f"PASS {mode}, NGINX_ACCESS_LOG={access_log!r}: {len(listeners) * len(CASES)} requests (uid={os.getuid()})")
             except Exception:
                 print(stderr.read_text())
                 raise
@@ -187,10 +207,20 @@ def main():
     thread.start()
     try:
         for mode in ("http-only", "https-only", "http-https"):
-            run_mode(mode, server.server_port, nginx)
+            for access_log in ("all", "errors", "off", None, ""):
+                run_mode(mode, server.server_port, nginx, access_log)
         for path, _ in CASES:
             assert (path, SECRET) in Upstream.seen, f"request changed before upstream: {path}"
         print("PASS original paths, query strings, and SDK-key headers reach upstream unchanged")
+        for access_log in ("on", "invalid"):
+            result = subprocess.run(
+                ["sh", str(ROOT / "entrypoint.sh")],
+                env=dict(os.environ, NGINX_ACCESS_LOG=access_log),
+                capture_output=True, text=True, timeout=5,
+            )
+            assert result.returncode != 0, access_log
+            assert "NGINX_ACCESS_LOG must be 'all', 'errors', or 'off'" in result.stderr, result.stderr
+        print("PASS invalid access-log modes fail startup with a clear error")
     finally:
         server.shutdown()
         server.server_close()

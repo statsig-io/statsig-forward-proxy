@@ -14,6 +14,7 @@ pub enum NormalizedPath {
     V1GetIdLists,
     V1DownloadIdListFile,
     V1LogEvent,
+    V1UserEnrichment,
     V2DownloadConfigSpecs,
     V2DownloadConfigSpecsDeltas,
     RawPath(String),
@@ -32,6 +33,7 @@ impl NormalizedPath {
             NormalizedPath::V1GetIdLists => "/v1/get_id_lists/",
             NormalizedPath::V1DownloadIdListFile => "/v1/download_id_list_file/",
             NormalizedPath::V1LogEvent => "/v1/log_event/",
+            NormalizedPath::V1UserEnrichment => "/v1/user_enrichment/",
             NormalizedPath::V2DownloadConfigSpecs => "/v2/download_config_specs/",
             NormalizedPath::V2DownloadConfigSpecsDeltas => "/v2/download_config_specs_deltas/",
             NormalizedPath::RawPath(path) => path,
@@ -49,6 +51,8 @@ impl From<&str> for NormalizedPath {
             NormalizedPath::V1DownloadIdListFile
         } else if value.starts_with("/v1/log_event") {
             NormalizedPath::V1LogEvent
+        } else if value.starts_with("/v1/user_enrichment") {
+            NormalizedPath::V1UserEnrichment
         } else if value.starts_with("/v2/download_config_specs_deltas") {
             NormalizedPath::V2DownloadConfigSpecsDeltas
         } else if value.starts_with("/v2/download_config_specs") {
@@ -94,6 +98,7 @@ mod tests {
         test_v1_get_id_lists: "/v1/get_id_lists" => NormalizedPath::V1GetIdLists,
         test_v1_download_id_list_file: "/v1/download_id_list_file/abc123" => NormalizedPath::V1DownloadIdListFile,
         test_v1_log_event: "/v1/log_event" => NormalizedPath::V1LogEvent,
+        test_v1_user_enrichment: "/v1/user_enrichment" => NormalizedPath::V1UserEnrichment,
         test_v2_download_config_specs: "/v2/download_config_specs" => NormalizedPath::V2DownloadConfigSpecs,
         test_v2_download_config_specs_deltas: "/v2/download_config_specs_deltas" => NormalizedPath::V2DownloadConfigSpecsDeltas,
     }

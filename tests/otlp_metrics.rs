@@ -3,7 +3,7 @@ use opentelemetry::metrics::MeterProvider;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{
     Protocol, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
-    OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE,
+    OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE, OTEL_EXPORTER_OTLP_METRICS_TIMEOUT,
 };
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     metrics_service_server::{MetricsService, MetricsServiceServer},
@@ -112,7 +112,8 @@ async fn assert_export_starts_tls_handshake(protocol: Protocol) {
             (OTEL_EXPORTER_OTLP_ENDPOINT, None),
             (OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, None),
             ("OTEL_EXPORTER_ENDPOINT", None),
-            ("OTEL_EXPORTER_OTLP_TIMEOUT", Some("1")),
+            // OTLP timeouts are milliseconds; allow time for TLS setup on CI.
+            (OTEL_EXPORTER_OTLP_METRICS_TIMEOUT, Some("5000")),
             ("NO_PROXY", Some("*")),
             ("no_proxy", Some("*")),
         ],

@@ -40,7 +40,7 @@ COPY ./benches ./benches
 RUN cp ./src/main.rs ./src/server.rs
 RUN cp ./src/main.rs ./src/client.rs
 RUN rustup update
-RUN cargo build --release
+RUN cargo build --locked --release
 RUN rm src/*.rs
 
 # Copy Important stuff and then build final binary
@@ -48,7 +48,7 @@ COPY ./src ./src
 COPY ./build.rs ./build.rs
 COPY ./api-interface-definitions ./api-interface-definitions
 RUN rm ./target/release/deps/server*
-RUN cargo build --release
+RUN cargo build --locked --release
 
 FROM nginxinc/nginx-unprivileged:1.29.5-alpine3.23
 

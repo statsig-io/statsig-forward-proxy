@@ -82,6 +82,45 @@ pub enum ProxyEventType {
     LogEventStoreDedupeCacheCleared,
     NginxCacheBytesUsed,
     NginxCacheBytesLimit,
+    // Idlist reverse-index sync
+    IdListProducerRunSuccess,
+    IdListProducerRunSkipped,
+    IdListProducerRunFailed,
+    IdListProducerDurationMs,
+    IdListTasksEnqueued,
+    IdListQueueDepth,
+    IdListManifestUnavailable,
+    IdListTaskCompleted,
+    IdListTaskFailed,
+    IdListTaskDurationMs,
+    IdListTaskClaimConflict,
+    IdListStaleTaskDropped,
+    IdListDeltaApplied,
+    IdListFullReloadStarted,
+    IdListFullReloadCommitted,
+    IdListFullReloadResumed,
+    IdListDiffPartitionsDone,
+    IdListScanVerifyFailed,
+    IdListOrphanExpired,
+    IdListVersionRepersisted,
+    IdListRemoved,
+    IdListSyncCheckpointLag,
+    IdListStalenessSeconds,
+    IdListClaimHeld,
+    IdListRedisStateReset,
+    // Idlist reverse-index request path
+    IdListMembershipFetchFailed,
+    IdListResolverMiss,
+    IdListDictRefreshSuccess,
+    IdListDictRefreshFailed,
+    IdListDictTargetedRefresh,
+    IdListReadPoolConnections,
+    IdListReadPoolIdleConnections,
+    // User enrichment endpoint
+    UserEnrichmentRequestSuccess,
+    UserEnrichmentRequestFailed,
+    UserEnrichmentLatencyMs,
+    UserEnrichmentLookupsPerRequest,
 }
 
 impl std::fmt::Display for ProxyEventType {
@@ -150,6 +189,56 @@ impl std::fmt::Display for ProxyEventType {
             }
             ProxyEventType::NginxCacheBytesUsed => write!(f, "NginxCacheBytesUsed"),
             ProxyEventType::NginxCacheBytesLimit => write!(f, "NginxCacheBytesLimit"),
+            ProxyEventType::IdListProducerRunSuccess => write!(f, "IdListProducerRunSuccess"),
+            ProxyEventType::IdListProducerRunSkipped => write!(f, "IdListProducerRunSkipped"),
+            ProxyEventType::IdListProducerRunFailed => write!(f, "IdListProducerRunFailed"),
+            ProxyEventType::IdListProducerDurationMs => write!(f, "IdListProducerDurationMs"),
+            ProxyEventType::IdListTasksEnqueued => write!(f, "IdListTasksEnqueued"),
+            ProxyEventType::IdListQueueDepth => write!(f, "IdListQueueDepth"),
+            ProxyEventType::IdListManifestUnavailable => write!(f, "IdListManifestUnavailable"),
+            ProxyEventType::IdListTaskCompleted => write!(f, "IdListTaskCompleted"),
+            ProxyEventType::IdListTaskFailed => write!(f, "IdListTaskFailed"),
+            ProxyEventType::IdListTaskDurationMs => write!(f, "IdListTaskDurationMs"),
+            ProxyEventType::IdListTaskClaimConflict => write!(f, "IdListTaskClaimConflict"),
+            ProxyEventType::IdListStaleTaskDropped => write!(f, "IdListStaleTaskDropped"),
+            ProxyEventType::IdListDeltaApplied => write!(f, "IdListDeltaApplied"),
+            ProxyEventType::IdListFullReloadStarted => write!(f, "IdListFullReloadStarted"),
+            ProxyEventType::IdListFullReloadCommitted => write!(f, "IdListFullReloadCommitted"),
+            ProxyEventType::IdListFullReloadResumed => write!(f, "IdListFullReloadResumed"),
+            ProxyEventType::IdListDiffPartitionsDone => write!(f, "IdListDiffPartitionsDone"),
+            ProxyEventType::IdListScanVerifyFailed => write!(f, "IdListScanVerifyFailed"),
+            ProxyEventType::IdListOrphanExpired => write!(f, "IdListOrphanExpired"),
+            ProxyEventType::IdListVersionRepersisted => write!(f, "IdListVersionRepersisted"),
+            ProxyEventType::IdListRemoved => write!(f, "IdListRemoved"),
+            ProxyEventType::IdListSyncCheckpointLag => write!(f, "IdListSyncCheckpointLag"),
+            ProxyEventType::IdListStalenessSeconds => write!(f, "IdListStalenessSeconds"),
+            ProxyEventType::IdListClaimHeld => write!(f, "IdListClaimHeld"),
+            ProxyEventType::IdListRedisStateReset => write!(f, "IdListRedisStateReset"),
+            ProxyEventType::IdListMembershipFetchFailed => {
+                write!(f, "IdListMembershipFetchFailed")
+            }
+            ProxyEventType::IdListResolverMiss => write!(f, "IdListResolverMiss"),
+            ProxyEventType::IdListDictRefreshSuccess => write!(f, "IdListDictRefreshSuccess"),
+            ProxyEventType::IdListDictRefreshFailed => write!(f, "IdListDictRefreshFailed"),
+            ProxyEventType::IdListDictTargetedRefresh => {
+                write!(f, "IdListDictTargetedRefresh")
+            }
+            ProxyEventType::IdListReadPoolConnections => {
+                write!(f, "IdListReadPoolConnections")
+            }
+            ProxyEventType::IdListReadPoolIdleConnections => {
+                write!(f, "IdListReadPoolIdleConnections")
+            }
+            ProxyEventType::UserEnrichmentRequestSuccess => {
+                write!(f, "UserEnrichmentRequestSuccess")
+            }
+            ProxyEventType::UserEnrichmentRequestFailed => {
+                write!(f, "UserEnrichmentRequestFailed")
+            }
+            ProxyEventType::UserEnrichmentLatencyMs => write!(f, "UserEnrichmentLatencyMs"),
+            ProxyEventType::UserEnrichmentLookupsPerRequest => {
+                write!(f, "UserEnrichmentLookupsPerRequest")
+            }
         }
     }
 }

@@ -129,6 +129,110 @@ These flags control how the proxy paces background refresh traffic and how it ba
 
 Related environment variable:
 `TOKIO_WORKER_THREADS_BACKGROUND`: Worker thread count for the dedicated Tokio runtime used by background polling loops. Must be a positive integer. Defaults to host CPU count.
+`SFP_IDLIST_SYNC_KEYS_JSON`: JSON array of server keys. When set, enables the reverse-index sync producer, one worker per pod, and `POST /v1/user_enrichment`. Requires Redis cache mode. Unset leaves all three off.
+
+`IDLIST_ENABLE_REVERSE_INDEX`: Boolean (`true` or `false`), default `true`.
+With `true`, synchronization and membership lookups use the existing reverse index.
+With `false`, synchronization maintains versioned forward sets and checkpoints but
+skips reverse-index writes, rotation diff fan-out, and reverse-index removal scans.
+Membership lookups check each list visible in the authenticated server key's manifest,
+using pipelined `SMISMEMBER` lookups against committed forward sets. If a list has
+no committed generation yet, lookups use its loading generation. They do not
+query other lists in the company's manifest union. This requires Redis 6.2 or newer.
+Each request performs work proportional to distinct lookup IDs multiplied by visible
+lists, so large manifests increase Redis CPU usage and response size. Forward-only
+reads use two pipelined round trips: version metadata, then membership checks.
+The existing fetch timeout covers both and pool acquisition. Forward-only readers
+do not load or refresh token dictionaries. Forward-only membership requests return
+HTTP 200 with available matches, including during recovery. Missing state or sets
+contribute no matches; results can be partial or stale while synchronization runs.
+Actual Redis command failures and timeouts still return HTTP 503.
+
+All producers, workers, and readers sharing a Redis key prefix must use the same
+setting. Stop the old fleet before changing modes; mixed-mode rolling deployments
+are unsupported. Disabling does not delete existing reverse keys or reclaim their
+memory automatically. Lists changed while disabled are marked for full reconciliation
+when re-enabled. Existing forward sets and checkpoints are reused when disabling.
+
+If the manifest still advertises an older file when reverse indexing is re-enabled,
+repair uses the committed file's metadata and never rolls back to that older file.
+A complete committed forward set is reused to rebuild reverse mappings without a
+download. Missing or unverified forward sets use normal download recovery for the
+committed file. Repair markers remain until the reverse rebuild succeeds.
+
+ID-list storage is shared by company. The proxy discovers each configured key's
+`company_id` from a full v2 JSON config-spec response at startup, retrying missing
+identities every 30 seconds through the existing HTTP provider. No-update
+responses preserve the mapping. Redis namespace identifiers are
+`base64(SHA256(company_id))[0:4]`; the configured keys remain a JSON string array.
+Reverse membership keys use `i:<C><M>`, where `C` is this four-character namespace
+and `M` is the eight-character member hash. Without a configured Redis key prefix,
+each reverse key is 14 bytes. Short namespaces have 24 bits of collision space;
+distinct companies sharing Redis must have different namespace hashes.
+Before generating tasks, the elected producer checks all discovered configured
+company IDs for namespace collisions. If any collide, it logs each conflicting
+namespace and its company IDs and fails the entire generation tick before writing
+tasks or readiness. This detects collisions among identities known to that producer;
+it does not resolve collisions or change existing queued tasks or membership reads.
+
+The producer synchronizes the union of the configured keys' manifests once per
+company. Shared list names produce one task, using the largest offset for the
+same file or the newest generation across snapshots. Missing manifests suppress
+company removals and readiness publication; an unresolved key's company suppresses
+both for all companies until its identity is known. All producer pods sharing a
+Redis key prefix must use the same configured key set, so they plan the same union.
+
+For an already synchronized list, a different `fileID` triggers a full load only
+when its `creationTime` is strictly newer than the committed file's. Equal or older
+rotations are ignored, even if their size grew. For the same `fileID`, creation time
+is ignored: size growth downloads the appended bytes; equal or smaller sizes do
+not schedule work. First loads and recovery of interrupted or missing current-file
+Redis state still use the full-load recovery path.
+
+Enrichment resolves the authenticated key to its company namespace, then filters
+membership names against that key's latest successful manifest. A missing company
+mapping or manifest returns HTTP 200 with empty membership results. An empty
+manifest also returns empty membership results. Dictionary caches are shared within a
+pod by company; authentication and rate limits remain per key.
+
+Changing the namespace hash length or reverse key format builds a fresh index,
+as does changing from server-key namespaces to company namespaces;
+old Redis namespaces are not migrated or deleted. During rollout, lookups can
+return empty or partial memberships while the new index builds. A known empty
+manifest does not require a Redis index. Avoid mixing old and new producer versions
+or workers: the task queue is shared across formats, so an old worker can consume a
+new-format task and publish readiness for an incompatible reverse index. Stop old
+producers, finish or discard their pending work, and stop all old workers before
+starting the new version. Discarded tasks also require clearing their task metadata.
+Rebuild the new index with
+enough memory for any retained old namespaces, or clean up the old index while
+serving is stopped. Do not use a rolling upgrade across this format change.
+
+Idlist sync worker tuning:
+
+Normal version changes use partitioned streaming diff for every list size. Lists
+below the partition target use one partition. First loads and transitions from an
+empty list directly fan out the new members without building a difference set.
+
+- `IDLIST_QUEUE_POLL_INTERVAL_MS` (default `2000`)
+- `IDLIST_LOCK_TTL_IN_S` (default `60`; renewed every third of the TTL)
+- `IDLIST_PIPELINE_BATCH_SIZE` (default `5000`)
+- `IDLIST_SCAN_COUNT` (default `1000`)
+- `IDLIST_DIFF_PARTITION_MAX_MEMBERS` (default `2000000`)
+- `IDLIST_OLD_VERSION_TTL_IN_S` (default `86400`)
+
+Idlist membership request-path tuning:
+- `IDLIST_REDIS_POOL_SIZE` (default `32`; dedicated read pool)
+- `IDLIST_REDIS_READ_URI` (optional `redis://` or `rediss://` read-replica address; defaults to the primary Redis address)
+- `IDLIST_FETCH_TIMEOUT_MS` (default `50`)
+- `IDLIST_DICT_REFRESH_IN_S` (default `60`)
+
+Membership requests return HTTP 200 with the memberships currently available,
+without checking namespace or list readiness, cardinality, or recovery flags.
+Missing member keys and unknown dictionary tokens contribute no memberships.
+Missing dictionary entries leave those memberships unresolved. During startup,
+rebuilding, or mode changes, results can be partial or stale; an empty result does not guarantee that source data excludes the ID.
+Actual Redis command failures and timeouts still return HTTP 503.
 
 Example direct image invocation with burst smoothing:
 
@@ -233,8 +337,27 @@ Note: In most cases, the default size limit for /dev/shm is 64mb, in our next ma
 
 ## Nginx Access Logs
 
-The official image emits nginx access logs to container stdout by default for HTTP,
-HTTPS, and combined HTTP/HTTPS deployments. The entrypoint runs nginx with
+The official image supports three nginx access-log modes for HTTP, HTTPS, and
+combined HTTP/HTTPS deployments. Set the `NGINX_ACCESS_LOG` environment variable:
+
+| Value | Behavior |
+| --- | --- |
+| `errors` (default) | Log requests with a status outside 2xx/3xx to stdout. |
+| `all` | Log every request to stdout, including successful requests and redirects. |
+| `off` | Disable nginx access logs entirely. |
+
+Unset or empty values use `errors`; unsupported values fail startup. The default
+preserves errors-only logging: successful requests are dominated by SDK polling
+and are already covered by the `HttpServerRequestSuccess`/`HttpServerRequestFailed`
+metrics, while nginx-served failures (for example 502/504 when the Rust proxy is
+unavailable) are only visible here. Use `off` to avoid access-log ingest costs, or
+`all` when troubleshooting requires a record of every request. Set the variable
+when starting the container (for example, `docker run -e NGINX_ACCESS_LOG=off ...`),
+or through [`sfp.environment` in Helm values](chart/README.md#example-configure-nginx-access-logs).
+Restart the container after changing it. This setting does not change Rust
+application logging, metrics, or nginx error-log handling.
+
+The entrypoint runs nginx with
 `daemon off` while the Rust proxy remains the main process. This works with the
 image's non-root user without a log-file mount, sidecar, or `/proc/1/fd` override;
 standard container log collectors can read the access lines.
@@ -250,7 +373,7 @@ cache key.
 For example:
 
 ```text
-127.0.0.1 - - [17/Sep/2026:12:00:00 +0000] "GET /v2/download_config_specs/[REDACTED] HTTP/1.1" 200 42 "-" "-"
+127.0.0.1 - - [17/Sep/2026:12:00:00 +0000] "GET /v2/download_config_specs/[REDACTED] HTTP/1.1" 502 157 "-" "-"
 ```
 
 Runtime nginx stderr remains suppressed: native nginx error messages can include

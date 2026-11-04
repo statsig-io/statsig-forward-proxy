@@ -80,6 +80,22 @@ What these flags do:
 - `--clear-datastore-on-unauthorized` clears cached data on 401/403 responses instead of serving stale results.
 - `--id-list-file-refresh-observer-enabled` enables asynchronous refreshes for `/v1/download_id_list_file` payloads referenced by `/v1/get_id_lists` manifests. It is disabled by default.
 
+### Example: Configure Nginx Access Logs
+
+Pass `NGINX_ACCESS_LOG` through `sfp.environment` to choose `all`, `errors`
+(default), or `off`. For example, to disable nginx access logs:
+
+```yaml
+sfp:
+  environment:
+    NGINX_ACCESS_LOG: "off"
+```
+
+`errors` logs only statuses outside 2xx/3xx; `all` logs every request. Unset or
+empty values use `errors`, and unsupported values fail startup. This controls
+nginx access logs only; application logging and metrics are unaffected. See
+[Nginx Access Logs](../README.md#nginx-access-logs) for details.
+
 ### Example: Configure Startup Warm-up Keys
 
 The proxy can prefetch a fixed set of SDK/path combinations before the steady-state background polling loop starts by setting `SFP_STARTUP_WARMUP_KEYS_JSON`.
